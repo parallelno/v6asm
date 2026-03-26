@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Instant;
 
 use clap::Parser;
 use v6_core::assembler::Assembler;
@@ -43,6 +44,7 @@ struct Cli {
 fn main() {
     env_logger::init();
     let cli = Cli::parse();
+    let started_at = Instant::now();
 
     let result = if let Some(ref name) = cli.init {
         cmd_init(name)
@@ -59,6 +61,22 @@ fn main() {
         print_error(&e);
         process::exit(1);
     }
+
+    if cli.project.is_some() || cli.deps.is_some() {
+        eprintln!("Compilation completed in {}", format_elapsed_time(started_at.elapsed()));
+    }
+}
+
+fn format_elapsed_time(elapsed: std::time::Duration) -> String {
+    let elapsed_seconds = elapsed.as_secs_f64();
+
+    if elapsed_seconds >= 3600.0 {
+        format!("{:.3} hours", elapsed_seconds / 3600.0)
+    } else if elapsed_seconds >= 1.0 {
+        format!("{:.3} seconds", elapsed_seconds)
+    } else {
+        format!("{:.0} ms", elapsed.as_secs_f64() * 1000.0)
+    }
 }
 
 fn print_error(e: &AsmError) {
@@ -72,6 +90,27 @@ fn print_error(e: &AsmError) {
 }
 
 // ---- Init command ----
+
+#[cfg(test)]
+mod tests {
+    use super::format_elapsed_time;
+    use std::time::Duration;
+
+    #[test]
+    fn formats_subsecond_durations_in_milliseconds() {
+        assert_eq!(format_elapsed_time(Duration::from_millis(39)), "39 ms");
+    }
+
+    #[test]
+    fn formats_second_durations_in_seconds() {
+        assert_eq!(format_elapsed_time(Duration::from_millis(1234)), "1.234 seconds");
+    }
+
+    #[test]
+    fn formats_hour_durations_in_hours() {
+        assert_eq!(format_elapsed_time(Duration::from_secs(5400)), "1.500 hours");
+    }
+}
 
 fn cmd_init(name: &str) -> Result<(), AsmError> {
     let project_file = format!("{}.project.json", name);
