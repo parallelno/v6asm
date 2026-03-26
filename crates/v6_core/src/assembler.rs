@@ -11,6 +11,8 @@ use crate::preprocessor::{SourceLine, expand_macro, parse_macro_invocation};
 use crate::project::CpuMode;
 use crate::symbols::SymbolTable;
 
+const MAX_LOOP_ITERATIONS: usize = 100_000;
+
 /// Output buffer for assembled code (sparse 64KB address space)
 pub struct OutputBuffer {
     data: Vec<Option<u8>>,
@@ -187,41 +189,85 @@ impl Assembler {
     }
 
     fn pass1(&mut self, lines: &[SourceLine]) -> AsmResult<()> {
+        self.process_lines_pass1(lines)
+    }
+
+    fn process_lines_pass1(&mut self, lines: &[SourceLine]) -> AsmResult<()> {
         let mut i = 0;
         while i < lines.len() {
             let line = &lines[i];
-            i += 1;
 
-            // Try to expand macro invocations
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
-                if self.macro_depth >= 32 {
-                    return Err(AsmError::new("Macro expansion depth exceeded 32 levels"));
-                }
-                let macro_def = self.symbols.get_macro(&macro_name).unwrap().clone();
-                let call_idx = self.symbols.macro_call_count() + 1;
-                let expanded = expand_macro(&macro_def, &args, call_idx, &line.file, line.line_num)?;
-                self.symbols.begin_macro_expansion(&macro_name);
-                self.macro_depth += 1;
-                self.pass1(&expanded)?;
-                self.macro_depth -= 1;
-                self.symbols.end_macro_expansion();
+                self.expand_macro_pass1(line, &macro_name, &args)?;
+                i += 1;
                 continue;
             }
 
-            self.process_line_pass1(line)?;
+            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            if tokens.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
+            if parsed.len() == 1 {
+                if let Some(control) = Self::control_directive(&parsed[0]) {
+                    match control {
+                        ControlDirective::If(expr) => {
+                            let end = self.find_matching_block_end(lines, i, BlockKind::If)?;
+                            if self.eval_expr(expr)? != 0 {
+                                self.process_lines_pass1(&lines[i + 1..end])?;
+                            }
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::Loop(expr) => {
+                            let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
+                            let count = self.eval_expr(expr)?;
+                            if count < 0 {
+                                return Err(AsmError::new("Loop count must be non-negative"));
+                            }
+                            if count as usize > MAX_LOOP_ITERATIONS {
+                                return Err(AsmError::new(format!(
+                                    "Loop iteration count exceeded {}",
+                                    MAX_LOOP_ITERATIONS
+                                )));
+                            }
+                            for _ in 0..count as usize {
+                                self.process_lines_pass1(&lines[i + 1..end])?;
+                            }
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::Optional => {
+                            let end = self.find_matching_block_end(lines, i, BlockKind::Optional)?;
+                            if !self.settings.optional_enabled
+                                || self.should_include_optional_block(lines, i + 1, end)?
+                            {
+                                self.process_lines_pass1(&lines[i + 1..end])?;
+                            }
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::EndIf
+                        | ControlDirective::EndLoop
+                        | ControlDirective::EndOptional => {
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            self.process_parsed_line_pass1(line, &parsed)?;
+            i += 1;
         }
         Ok(())
     }
 
-    fn process_line_pass1(&mut self, line: &SourceLine) -> AsmResult<()> {
-        let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
-        if tokens.is_empty() {
-            return Ok(());
-        }
+    fn process_parsed_line_pass1(&mut self, line: &SourceLine, parsed: &[ParsedLine]) -> AsmResult<()> {
 
-        let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
-
-        for item in &parsed {
+        for item in parsed {
             match item {
                 ParsedLine::Empty => {}
                 ParsedLine::Label(name) => {
@@ -240,12 +286,10 @@ impl Assembler {
                             if *is_local {
                                 self.symbols.define_local_constant(name, val, &line.file, line.line_num)?;
                             } else {
-                                // Check if it's a mutable variable update
-                                if self.symbols.exists(name) {
-                                    if let Err(_) = self.symbols.define_constant(name, val, &line.file, line.line_num) {
-                                        // May be a .var update
-                                        self.symbols.update_variable(name, val)?;
-                                    }
+                                if self.symbols.is_mutable(name) {
+                                    self.symbols.update_variable(name, val)?;
+                                } else if self.symbols.exists(name) {
+                                    self.symbols.define_constant(name, val, &line.file, line.line_num)?;
                                 } else {
                                     self.symbols.define_constant(name, val, &line.file, line.line_num)?;
                                 }
@@ -381,41 +425,85 @@ impl Assembler {
     }
 
     fn pass2(&mut self, lines: &[SourceLine]) -> AsmResult<()> {
+        self.process_lines_pass2(lines)
+    }
+
+    fn process_lines_pass2(&mut self, lines: &[SourceLine]) -> AsmResult<()> {
         let mut i = 0;
         while i < lines.len() {
             let line = &lines[i];
-            i += 1;
 
-            // Try to expand macro invocations
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
-                if self.macro_depth >= 32 {
-                    return Err(AsmError::new("Macro expansion depth exceeded 32 levels"));
-                }
-                let macro_def = self.symbols.get_macro(&macro_name).unwrap().clone();
-                let call_idx = self.symbols.macro_call_count() + 1;
-                let expanded = expand_macro(&macro_def, &args, call_idx, &line.file, line.line_num)?;
-                self.symbols.begin_macro_expansion(&macro_name);
-                self.macro_depth += 1;
-                self.pass2(&expanded)?;
-                self.macro_depth -= 1;
-                self.symbols.end_macro_expansion();
+                self.expand_macro_pass2(line, &macro_name, &args)?;
+                i += 1;
                 continue;
             }
 
-            self.process_line_pass2(line)?;
+            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            if tokens.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
+            if parsed.len() == 1 {
+                if let Some(control) = Self::control_directive(&parsed[0]) {
+                    match control {
+                        ControlDirective::If(expr) => {
+                            let end = self.find_matching_block_end(lines, i, BlockKind::If)?;
+                            if self.eval_expr(expr)? != 0 {
+                                self.process_lines_pass2(&lines[i + 1..end])?;
+                            }
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::Loop(expr) => {
+                            let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
+                            let count = self.eval_expr(expr)?;
+                            if count < 0 {
+                                return Err(AsmError::new("Loop count must be non-negative"));
+                            }
+                            if count as usize > MAX_LOOP_ITERATIONS {
+                                return Err(AsmError::new(format!(
+                                    "Loop iteration count exceeded {}",
+                                    MAX_LOOP_ITERATIONS
+                                )));
+                            }
+                            for _ in 0..count as usize {
+                                self.process_lines_pass2(&lines[i + 1..end])?;
+                            }
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::Optional => {
+                            let end = self.find_matching_block_end(lines, i, BlockKind::Optional)?;
+                            if !self.settings.optional_enabled
+                                || self.should_include_optional_block(lines, i + 1, end)?
+                            {
+                                self.process_lines_pass2(&lines[i + 1..end])?;
+                            }
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::EndIf
+                        | ControlDirective::EndLoop
+                        | ControlDirective::EndOptional => {
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            self.process_parsed_line_pass2(line, &parsed)?;
+            i += 1;
         }
         Ok(())
     }
 
-    fn process_line_pass2(&mut self, line: &SourceLine) -> AsmResult<()> {
-        let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
-        if tokens.is_empty() {
-            return Ok(());
-        }
+    fn process_parsed_line_pass2(&mut self, line: &SourceLine, parsed: &[ParsedLine]) -> AsmResult<()> {
 
-        let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
-
-        for item in &parsed {
+        for item in parsed {
             match item {
                 ParsedLine::Empty => {}
                 ParsedLine::Label(name) => {
@@ -444,10 +532,10 @@ impl Assembler {
                     if *is_local {
                         self.symbols.define_local_constant(name, val, &line.file, line.line_num)?;
                     } else {
-                        if self.symbols.exists(name) {
-                            if let Err(_) = self.symbols.define_constant(name, val, &line.file, line.line_num) {
-                                self.symbols.update_variable(name, val)?;
-                            }
+                        if self.symbols.is_mutable(name) {
+                            self.symbols.update_variable(name, val)?;
+                        } else if self.symbols.exists(name) {
+                            self.symbols.define_constant(name, val, &line.file, line.line_num)?;
                         } else {
                             self.symbols.define_constant(name, val, &line.file, line.line_num)?;
                         }
@@ -477,6 +565,127 @@ impl Assembler {
             }
         }
         Ok(())
+    }
+
+    fn expand_macro_pass1(&mut self, line: &SourceLine, macro_name: &str, args: &[String]) -> AsmResult<()> {
+        if self.macro_depth >= 32 {
+            return Err(AsmError::new("Macro expansion depth exceeded 32 levels"));
+        }
+        let macro_def = self.symbols.get_macro(macro_name).unwrap().clone();
+        let call_idx = self.symbols.macro_call_count() + 1;
+        let expanded = expand_macro(&macro_def, args, call_idx, &line.file, line.line_num)?;
+        self.symbols.begin_macro_expansion(macro_name);
+        self.macro_depth += 1;
+        let result = self.process_lines_pass1(&expanded);
+        self.macro_depth -= 1;
+        self.symbols.end_macro_expansion();
+        result
+    }
+
+    fn expand_macro_pass2(&mut self, line: &SourceLine, macro_name: &str, args: &[String]) -> AsmResult<()> {
+        if self.macro_depth >= 32 {
+            return Err(AsmError::new("Macro expansion depth exceeded 32 levels"));
+        }
+        let macro_def = self.symbols.get_macro(macro_name).unwrap().clone();
+        let call_idx = self.symbols.macro_call_count() + 1;
+        let expanded = expand_macro(&macro_def, args, call_idx, &line.file, line.line_num)?;
+        self.symbols.begin_macro_expansion(macro_name);
+        self.macro_depth += 1;
+        let result = self.process_lines_pass2(&expanded);
+        self.macro_depth -= 1;
+        self.symbols.end_macro_expansion();
+        result
+    }
+
+    fn control_directive<'a>(parsed: &'a ParsedLine) -> Option<ControlDirective<'a>> {
+        match parsed {
+            ParsedLine::Directive(Directive::If(expr)) => Some(ControlDirective::If(expr)),
+            ParsedLine::Directive(Directive::EndIf) => Some(ControlDirective::EndIf),
+            ParsedLine::Directive(Directive::Loop(expr)) => Some(ControlDirective::Loop(expr)),
+            ParsedLine::Directive(Directive::EndLoop) => Some(ControlDirective::EndLoop),
+            ParsedLine::Directive(Directive::Optional) => Some(ControlDirective::Optional),
+            ParsedLine::Directive(Directive::EndOptional) => Some(ControlDirective::EndOptional),
+            _ => None,
+        }
+    }
+
+    fn find_matching_block_end(&self, lines: &[SourceLine], start: usize, kind: BlockKind) -> AsmResult<usize> {
+        let mut depth = 0usize;
+        for (idx, line) in lines.iter().enumerate().skip(start) {
+            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            if tokens.is_empty() {
+                continue;
+            }
+            let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
+            if parsed.len() != 1 {
+                continue;
+            }
+            if let Some(control) = Self::control_directive(&parsed[0]) {
+                match (kind, control) {
+                    (BlockKind::If, ControlDirective::If(_))
+                    | (BlockKind::Loop, ControlDirective::Loop(_))
+                    | (BlockKind::Optional, ControlDirective::Optional) => {
+                        depth += 1;
+                    }
+                    (BlockKind::If, ControlDirective::EndIf)
+                    | (BlockKind::Loop, ControlDirective::EndLoop)
+                    | (BlockKind::Optional, ControlDirective::EndOptional) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Ok(idx);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(AsmError::new(format!("Missing {}", kind.end_directive_name())))
+    }
+
+    fn should_include_optional_block(&self, lines: &[SourceLine], block_start: usize, block_end: usize) -> AsmResult<bool> {
+        let defined = self.collect_optional_block_symbols(&lines[block_start..block_end])?;
+        if defined.is_empty() {
+            return Ok(false);
+        }
+
+        for (idx, line) in lines.iter().enumerate() {
+            if idx >= block_start && idx < block_end {
+                continue;
+            }
+            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            if tokens.is_empty() {
+                continue;
+            }
+            for token in &tokens {
+                if let crate::lexer::Token::Identifier(name) = &token.value {
+                    if defined.iter().any(|defined_name| defined_name == name) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn collect_optional_block_symbols(&self, lines: &[SourceLine]) -> AsmResult<Vec<String>> {
+        let mut names = Vec::new();
+        for line in lines {
+            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            if tokens.is_empty() {
+                continue;
+            }
+            let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
+            for item in parsed {
+                match item {
+                    ParsedLine::Label(name) => names.push(name),
+                    ParsedLine::ConstDef { name, is_local: false, .. } => names.push(name),
+                    ParsedLine::VarDef { name, .. } => names.push(name),
+                    _ => {}
+                }
+            }
+        }
+        Ok(names)
     }
 
     fn process_directive_pass2(&mut self, dir: &Directive, file: &str, line_num: usize) -> AsmResult<()> {
@@ -778,5 +987,395 @@ impl Assembler {
                 params: def.params.iter().map(|p| p.name.clone()).collect(),
             });
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BlockKind {
+    If,
+    Loop,
+    Optional,
+}
+
+impl BlockKind {
+    fn end_directive_name(self) -> &'static str {
+        match self {
+            BlockKind::If => ".endif",
+            BlockKind::Loop => ".endloop",
+            BlockKind::Optional => ".endoptional",
+        }
+    }
+}
+
+enum ControlDirective<'a> {
+    If(&'a Expr),
+    EndIf,
+    Loop(&'a Expr),
+    EndLoop,
+    Optional,
+    EndOptional,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::preprocessor::preprocess;
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestProject {
+        root: PathBuf,
+    }
+
+    impl TestProject {
+        fn new(files: &[(&str, &[u8])]) -> Self {
+            let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("v6asm-tests-{}-{}", nanos, unique));
+            fs::create_dir_all(&root).unwrap();
+            for (path, contents) in files {
+                let full_path = root.join(path);
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent).unwrap();
+                }
+                fs::write(full_path, contents).unwrap();
+            }
+            Self { root }
+        }
+
+        fn path(&self, rel: &str) -> PathBuf {
+            self.root.join(rel)
+        }
+    }
+
+    impl Drop for TestProject {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn assemble_project(project: &TestProject, main_file: &str) -> Assembler {
+        let main_path = project.path(main_file);
+        let mut assembler = Assembler::new(CpuMode::I8080, project.root.clone());
+        let lines = preprocess(&main_path, &project.root, &mut assembler.symbols, &|path| {
+            fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
+        })
+        .unwrap();
+        assembler.assemble(&lines).unwrap();
+        assembler
+    }
+
+    fn assemble_project_result(project: &TestProject, main_file: &str) -> AsmResult<Assembler> {
+        let main_path = project.path(main_file);
+        let mut assembler = Assembler::new(CpuMode::I8080, project.root.clone());
+        let lines = preprocess(&main_path, &project.root, &mut assembler.symbols, &|path| {
+            fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
+        })?;
+        assembler.assemble(&lines)?;
+        Ok(assembler)
+    }
+
+    fn rom_bytes(assembler: &Assembler) -> Vec<u8> {
+        assembler.output.extract_rom()
+    }
+
+    #[test]
+    fn assembles_org_byte_word_dword_align_storage_and_text() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+.byte 1, 2
+.word $1234
+.dword $12345678
+.align 16
+.storage 2, $AA
+.text "Hi", '!'"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(assembler.output.min_addr(), Some(0x0100));
+        assert_eq!(rom_bytes(&assembler), vec![
+            0x01, 0x02,
+            0x34, 0x12,
+            0x78, 0x56, 0x34, 0x12,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xAA, 0xAA,
+            b'H', b'i', b'!'
+        ]);
+    }
+
+    #[test]
+    fn assembles_include_filesize_and_incbin() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+SIZE .filesize "assets/blob.bin"
+.include "inc.asm"
+.byte SIZE
+.incbin "assets/blob.bin", 1, 3"#,
+            ),
+            (
+                "inc.asm",
+                b".byte $11\n.word $2233\n",
+            ),
+            (
+                "assets/blob.bin",
+                &[0x10, 0x20, 0x30, 0x40, 0x50],
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(assembler.symbols.resolve("SIZE"), Some(5));
+        assert_eq!(rom_bytes(&assembler), vec![0x11, 0x33, 0x22, 0x05, 0x20, 0x30, 0x40]);
+    }
+
+    #[test]
+    fn assembles_macro_with_defaults_and_endmacro() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+.macro PUT(value=$2A)
+    .byte value
+.endmacro
+PUT()
+PUT($7F)"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(rom_bytes(&assembler), vec![0x2A, 0x7F]);
+    }
+
+    #[test]
+    fn assembles_if_blocks_and_skips_false_branches() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+FLAG = 1
+.if FLAG
+    .byte $AA
+.endif
+.if 0
+    .error "should not execute"
+.endif
+.if FLAG == 0
+    .byte $BB
+.endif
+.byte $CC"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(rom_bytes(&assembler), vec![0xAA, 0xCC]);
+    }
+
+    #[test]
+    fn assembles_loop_blocks_and_updates_variables_per_iteration() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+Counter .var 1
+.loop 3
+    .byte Counter
+    Counter = Counter + 1
+.endloop
+.byte Counter"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(assembler.symbols.resolve("Counter"), Some(4));
+        assert_eq!(rom_bytes(&assembler), vec![0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn assembles_optional_blocks_when_referenced() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+    jmp Used
+.optional
+Used:
+    .byte $44
+.endoptional"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(rom_bytes(&assembler), vec![0xC3, 0x03, 0x01, 0x44]);
+    }
+
+    #[test]
+    fn prunes_optional_blocks_when_unreferenced() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+.optional
+Unused:
+    .byte $44
+.endoptional
+.byte $55"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(rom_bytes(&assembler), vec![0x55]);
+    }
+
+    #[test]
+    fn setting_optional_false_disables_pruning() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+.setting optional, false
+.optional
+Unused:
+    .byte $44
+.endoptional
+.byte $55"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert!(!assembler.settings.optional_enabled);
+        assert_eq!(rom_bytes(&assembler), vec![0x44, 0x55]);
+    }
+
+    #[test]
+    fn supports_db_dw_and_dd_aliases() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+DB 1, 2
+DW $1234
+DD $12345678"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(rom_bytes(&assembler), vec![0x01, 0x02, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn applies_encoding_to_text_output() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+.encoding "ascii", "upper"
+.text "ab", 'c'
+.encoding "screencodecommodore"
+.text "@A""#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(rom_bytes(&assembler), vec![b'A', b'B', b'C', 0x00, 0x01]);
+    }
+
+    #[test]
+    fn executes_print_without_failing() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+VALUE = 3
+.print "value", VALUE
+.byte VALUE"#,
+            ),
+        ]);
+
+        let main_path = project.path("main.asm");
+        let mut assembler = Assembler::new(CpuMode::I8080, project.root.clone());
+        assembler.quiet = false;
+        let lines = preprocess(&main_path, &project.root, &mut assembler.symbols, &|path| {
+            fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
+        })
+        .unwrap();
+        assembler.assemble(&lines).unwrap();
+
+        assert_eq!(rom_bytes(&assembler), vec![0x03]);
+    }
+
+    #[test]
+    fn reports_error_directive_with_source_location() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+.error "boom", 7"#,
+            ),
+        ]);
+
+        let error = assemble_project_result(&project, "main.asm").err().unwrap();
+
+        assert_eq!(error.message, "boom 7");
+        assert_eq!(error.location.unwrap().line, 2);
+    }
+
+    #[test]
+    fn supports_var_and_reassignment() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+Counter .var 10
+.byte Counter
+Counter = Counter - 1
+.byte Counter
+Counter EQU 5
+.byte Counter"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(assembler.symbols.resolve("Counter"), Some(5));
+        assert_eq!(rom_bytes(&assembler), vec![10, 9, 5]);
+    }
+
+    #[test]
+    fn supports_bare_storage_without_filler() {
+        let project = TestProject::new(&[
+            (
+                "main.asm",
+                br#".org $0100
+.byte 1
+.storage 2
+.byte 2"#,
+            ),
+        ]);
+
+        let assembler = assemble_project(&project, "main.asm");
+
+        assert_eq!(rom_bytes(&assembler), vec![1, 0, 0, 2]);
     }
 }

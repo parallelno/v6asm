@@ -316,6 +316,10 @@ impl SymbolTable {
         self.globals.contains_key(name)
     }
 
+    pub fn is_mutable(&self, name: &str) -> bool {
+        self.globals.get(name).map(|info| info.is_mutable).unwrap_or(false)
+    }
+
     /// Reset for pass 2 (keep definitions, reset scope tracking)
     pub fn reset_for_pass2(&mut self) {
         self.current_scope = 0;
