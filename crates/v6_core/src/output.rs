@@ -1,10 +1,6 @@
-use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Serialize;
-use serde_json;
-
-use crate::assembler::{Assembler, DebugInfo};
+use crate::assembler::Assembler;
 use crate::diagnostics::{AsmError, AsmResult};
 
 // Maximum number of bytes to display in the listing BYTES column
@@ -42,133 +38,10 @@ pub fn rom_start_address(asm: &Assembler) -> u16 {
     asm.output.min_addr().unwrap_or(0)
 }
 
-// ---- Debug JSON output ----
-
-#[derive(Serialize)]
-struct DebugOutput {
-    labels: HashMap<String, DebugLabel>,
-    consts: HashMap<String, DebugConst>,
-    macros: HashMap<String, DebugMacro>,
-    #[serde(rename = "projectFile")]
-    project_file: String,
-    #[serde(rename = "lineAddresses")]
-    line_addresses: HashMap<String, HashMap<String, Vec<String>>>,
-    #[serde(rename = "dataLines")]
-    data_lines: HashMap<String, HashMap<String, DebugDataLine>>,
-    breakpoints: HashMap<String, serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct DebugLabel {
-    addr: String,
-    src: String,
-    line: usize,
-}
-
-#[derive(Serialize)]
-struct DebugConst {
-    value: i64,
-    hex: String,
-    line: usize,
-    src: String,
-}
-
-#[derive(Serialize)]
-struct DebugMacro {
-    src: String,
-    line: usize,
-    params: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct DebugDataLine {
-    addr: String,
-    #[serde(rename = "byteLength")]
-    byte_length: usize,
-    #[serde(rename = "unitBytes")]
-    unit_bytes: usize,
-}
-
-/// Generate debug JSON string matching the expected format
-pub fn generate_debug_json(debug: &DebugInfo, project_file: &str) -> AsmResult<String> {
-    let mut labels = HashMap::new();
-    for (name, info) in &debug.labels {
-        labels.insert(name.clone(), DebugLabel {
-            addr: format!("0x{:04X}", info.addr),
-            src: info.src.clone(),
-            line: info.line,
-        });
-    }
-
-    let mut consts = HashMap::new();
-    for (name, info) in &debug.consts {
-        consts.insert(name.clone(), DebugConst {
-            value: info.value,
-            hex: format!("0x{:04X}", info.value as u16),
-            line: info.line,
-            src: info.src.clone(),
-        });
-    }
-
-    let mut macros = HashMap::new();
-    for (name, info) in &debug.macros {
-        macros.insert(name.clone(), DebugMacro {
-            src: info.src.clone(),
-            line: info.line,
-            params: info.params.clone(),
-        });
-    }
-
-    // Convert line_addresses: HashMap<String, HashMap<usize, Vec<u16>>>
-    // to HashMap<String, HashMap<String, Vec<String>>>
-    let mut line_addresses: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
-    for (file, lines) in &debug.line_addresses {
-        let mut file_lines = HashMap::new();
-        for (line_num, addrs) in lines {
-            let addr_strs: Vec<String> = addrs.iter().map(|a| format!("0x{:04X}", a)).collect();
-            file_lines.insert(line_num.to_string(), addr_strs);
-        }
-        line_addresses.insert(file.clone(), file_lines);
-    }
-
-    // Convert data_lines
-    let mut data_lines: HashMap<String, HashMap<String, DebugDataLine>> = HashMap::new();
-    for (file, lines) in &debug.data_lines {
-        let mut file_lines = HashMap::new();
-        for (line_num, info) in lines {
-            file_lines.insert(line_num.to_string(), DebugDataLine {
-                addr: format!("0x{:04X}", info.addr),
-                byte_length: info.byte_length,
-                unit_bytes: info.unit_bytes,
-            });
-        }
-        data_lines.insert(file.clone(), file_lines);
-    }
-
-    let output = DebugOutput {
-        labels,
-        consts,
-        macros,
-        project_file: project_file.to_string(),
-        line_addresses,
-        data_lines,
-        breakpoints: HashMap::new(),
-    };
-
-    serde_json::to_string_pretty(&output)
-        .map_err(|e| AsmError::new(format!("Failed to serialize debug JSON: {}", e)))
-}
-
 /// Write ROM to file
 pub fn write_rom(rom: &[u8], path: &Path) -> AsmResult<()> {
     std::fs::write(path, rom)
         .map_err(|e| AsmError::new(format!("Failed to write ROM file: {}", e)))
-}
-
-/// Write debug JSON to file
-pub fn write_debug_json(json: &str, path: &Path) -> AsmResult<()> {
-    std::fs::write(path, json)
-        .map_err(|e| AsmError::new(format!("Failed to write debug file: {}", e)))
 }
 
 // ---- Listing file output ----

@@ -3,86 +3,39 @@
 ## CLI Usage
 
 ```
-v6asm <project.project.json> [options]
+v6asm <source.asm> [options]
 v6asm --init <name>
-v6asm --deps <project.project.json> [options]
 ```
 
 ### Arguments
 
 | Argument | Description |
 |----------|-------------|
-| `<project>` | Project file (`.project.json`) to assemble |
-| `--init <name>` | Initialize a new project with the given name |
-| `--deps <project>` | Compile dependent projects before the main one |
+| `<source>` | Assembly source file (`.asm`) to compile |
+| `--init <name>` | Scaffold a new `.asm` file with a starter template |
+| `-o`, `--output <path>` | Output ROM path (default: `<source>.rom`) |
+| `--cpu <cpu>` | Target CPU: `i8080` (default) or `z80` |
+| `--rom-align <n>` | ROM size alignment in bytes (default: `1`) |
 | `-q`, `--quiet` | Suppress `.print` output |
 | `-v`, `--verbose` | Extra diagnostics |
-| `--lst` | Generate a listing file (`.lst`) alongside the ROM. The listing is written to the same path as the ROM with a `.lst` extension. If `lstPath` is set in the project config, that path takes precedence. |
+| `--lst` | Generate a listing file (`.lst`) alongside the ROM |
 
-## Project Artifacts
+### Examples
 
-- `<project_name>.project.json` — project settings.
-- `<project_name>.debug.json` — debug metadata (tokens, labels, consts, breakpoints).
-- `<project_name>.rom` — Vector 06c executable loaded by the emulator.
-- `<project_name>.lst` — optional listing file showing addresses, emitted bytes, and source lines.
-- `<project_name>.ram_disk.bin` — RAM disk image (all eight supported disks).
-- `<name>.fdd` — floppy disk image (usually 820 KB). Add `"fddPath": "./out/<your_fdd_name>.fdd"` to settings to auto-load it on the next run.
-  - If `fddContentPath` project setting is set, a new FDD image is rebuilt at `fddPath` on each successful ROM compile using that folder’s files (recursively).
-
-## Project Configuration
-
-All projects start with creating a `.project.json` file that declares the project name, entry ASM file, output ROM path, and any optional emulator settings. It's an entry point for all extention command. Generate a fresh project file with **Devector: Create Project**.
-
-### Example `.project.json`
-
-```json
-{
-  "name": "prg",
-  "asmPath": "prg_main.asm",
-  "debugPath": "prg.debug.json",
-  "romPath": "out\\prg.rom",
-  "lstPath": "out\\prg.lst",
-  "fddPath": "out\\prg.fdd",
-  "fddContentPath": "assets\\fdd_contents",
-  "fddTemplatePath": "rds308.fdd",
-  "romAlign": 2,
-  "dependentProjectsDir": "deps",
-  "settings": {
-    "speed": "max",
-    "viewMode": "noBorder",
-    "ramDiskPath": "out\\prg.ram_disk.bin"
-  }
-}
+```bash
+v6asm main.asm                        # compile, output main.rom
+v6asm main.asm -o out/program.rom     # custom output path
+v6asm main.asm --cpu z80 --lst        # Z80 mode + listing
+v6asm --init myproject                # create myproject.asm from template
 ```
 
-### Fields
+## Output Artifacts
 
-- **name**: Project name.
-- **asmPath**: Entry assembly file to compile (e.g., `prg_main.asm`).
-- **debugPath**: (Optional) Path for the generated debug metadata (e.g., `prg.debug.json`).
-- **romPath**: (Optional) Output ROM path (e.g., `out\\prg.rom`).
-- **lstPath**: (Optional) Output listing file path (e.g., `out\\prg.lst`). When set, the assembler generates a `.lst` file showing the address, emitted bytes, source line number, and source text for every assembled line.
-- **fddPath**: (Optional) FDD image to boot; takes precedence over `romPath` when valid.
-- **fddContentPath**: (Optional) Folder whose files are packed into a fresh FDD image at `fddPath` after each successful ROM compile. Paths are resolved relative to the project file unless absolute; files are added recursively.
-- **fddTemplatePath**: (Optional) Template FDD image to start from when building the output at `fddPath`. If it contains the `"rds308.fdd"` string, the built-in template (comes with this extension) is used; other values resolve relative to the project file unless absolute.
-- **romAlign**: Optional ROM size alignment in bytes (e.g., `2` to force even length).
-- **dependentProjectsDir**: (Optional) Directory containing dependent `*.project.json` files. Paths resolved relative to the current project file unless absolute. Use **Devector: Compile Dependencies** command or a context menu in Explorer to compile every `*.project.json` in that directory in alphabetical order.
-- **cpu**: (Optional) Target CPU for the assembler: `"i8080"` (default) or `"z80"`. Z80 mode accepts only the i8080-compatible subset of Z80 mnemonics (e.g., `LD`, `ADD A,`, `JP`, `CALL`, port I/O forms like `OUT (N),A`). IX/IY and other Z80-only extensions are intentionally not supported.
-- **settings**: (Optional) Per-project emulator preferences (see below).
-
-### Settings
-
-- **speed**: (Optional) Initial emulation speed (`0.1`, `1`, `2`, `4`, `8`, or `"max"`). `"max"` removes frame pacing. video/audio quality degrade in favor of performance.
-- **viewMode**: (Optional) Emulator viewport mode (`"border"`, `"noBorder"`).
-- **ramDiskPath**: (Optional) RAM disk image path for persistence across emulator restarts.
-- **ramDiskClearAfterRestart**: (Optional) Clear RAM disk data on emulator restart.
-- **fddIdx**: (Optional): Floppy drive index to load fdd (0-3).
-- **autoBoot**: (Optional): Automatically boot FDD if pfddPath is set.
-- **fddReadOnly**: (Optional): Open FDD in read-only mode.
-- **romHotReload**: (Optional): When `true`, saving any included `.asm` file triggers a background recompilation of the main project (excluding `dependentProjectsDir`) and applies a memory diff patch. The system automatically adjusts the PC (Program Counter) register to maintain execution flow: it captures the PC and nearby labels (within 100 bytes) before recompilation, then after recompilation, it matches label addresses and adjusts the PC by the same offset to preserve the execution position. This helps prevent disruption when code before the execution point changes size.
+- `<name>.rom` — Vector 06c executable loaded by the emulator.
+- `<name>.lst` — optional listing file (enabled with `--lst`) showing addresses, emitted bytes, and source lines.
 
 ## Assembler
-By default the assembler targets the Intel 8080 instruction set. If a project sets `"cpu": "z80"`, it enables a compatibility subset of Zilog Z80 mnemonics that map 1:1 to the 8080 instruction encodings (including Z80 aliases like `LD (N),A` and `ADD HL,BC`). Pure Z80-only features such as IX/IY indexed addressing are not supported.
+By default the assembler targets the Intel 8080 instruction set. Use `--cpu z80` to enable a compatibility subset of Zilog Z80 mnemonics that map 1:1 to the 8080 instruction encodings (including Z80 aliases like `LD (N),A` and `ADD HL,BC`). Pure Z80-only features such as IX/IY indexed addressing are not supported.
 
 ### Comments
 

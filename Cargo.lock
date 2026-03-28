@@ -434,8 +434,6 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
- "serde",
- "serde_json",
  "v6_core",
 ]
 
