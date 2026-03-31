@@ -1,15 +1,15 @@
-# v6_assembler
+# v6asm
 
 > A two-pass Intel 8080 / Z80-compatible assembler for the **Vector-06c** home computer, written in Rust.
 
-[![CI/CD](https://github.com/parallelno/v6_assembler/actions/workflows/ci.yml/badge.svg)](https://github.com/parallelno/v6_assembler/actions/workflows/ci.yml)
+[![CI/CD](https://github.com/parallelno/v6asm/actions/workflows/ci.yml/badge.svg)](https://github.com/parallelno/v6asm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
 ## Overview
 
-`v6_assembler` is a command-line toolchain for developing software for the **Vector-06c** (Вектор-06Ц) — a Soviet-era Z80-compatible home computer. It assembles `.asm` source files into `.rom` binaries and can optionally build bootable **FDD disk images** ready to load in an emulator.
+`v6asm` is a command-line toolchain for developing software for the **Vector-06c** (Вектор-06Ц) — a Soviet-era Z80-compatible home computer. It assembles `.asm` source files into `.rom` binaries and can optionally build bootable **FDD disk images** ready to load in an emulator.
 
 The workspace contains two standalone CLI tools:
 
@@ -40,7 +40,7 @@ The workspace contains two standalone CLI tools:
 
 ### Download a prebuilt release
 
-Grab the latest archive for your platform from the [Releases](https://github.com/parallelno/v6_assembler/releases) page and extract it. The archive contains:
+Grab the latest archive for your platform from the [Releases](https://github.com/parallelno/v6asm/releases) page and extract it. The archive contains:
 
 ```
 v6asm       (v6asm.exe on Windows)
@@ -56,8 +56,8 @@ Add the extracted directory to your `PATH` or copy the binaries to a directory t
 Prerequisites: [Rust toolchain](https://rustup.rs/) (stable).
 
 ```bash
-git clone https://github.com/parallelno/v6_assembler.git
-cd v6_assembler
+git clone https://github.com/parallelno/v6asm.git
+cd v6asm
 cargo build --release
 ```
 

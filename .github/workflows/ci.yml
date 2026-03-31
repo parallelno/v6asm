@@ -88,7 +88,7 @@ jobs:
         env:
           VERSION: ${{ needs.test.outputs.version }}
         run: |
-          DIR="v6_assembler-${VERSION}-${{ matrix.platform }}"
+          DIR="v6asm-${VERSION}-${{ matrix.platform }}"
           mkdir -p "$DIR"
           cp "target/${{ matrix.target }}/release/v6asm" "$DIR/"
           cp "target/${{ matrix.target }}/release/v6fdd" "$DIR/"
@@ -102,7 +102,7 @@ jobs:
         env:
           VERSION: ${{ needs.test.outputs.version }}
         run: |
-          $dir = "v6_assembler-${env:VERSION}-${{ matrix.platform }}"
+          $dir = "v6asm-${env:VERSION}-${{ matrix.platform }}"
           New-Item -ItemType Directory -Force -Path $dir
           Copy-Item "target\${{ matrix.target }}\release\v6asm.exe" "$dir\"
           Copy-Item "target\${{ matrix.target }}\release\v6fdd.exe" "$dir\"
@@ -114,7 +114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.test.outputs.version }}-${{ matrix.platform }}
-          path: v6_assembler-${{ needs.test.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+          path: v6asm-${{ needs.test.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
 
   release:
     name: Create Release
