@@ -16,7 +16,7 @@ compiled addresses back to source code metadata, enabling source-level debugging
 - Data lines byte length is the total number of bytes emitted by that single source line. Used for boundary check.
 - Data lines unit bytes is the size in bytes of one logical element on that line. For .byte it's 1, for .word it's 2, etc.
 - A C compiler uses actual function metadata for function symbols.
-- An assembler uses `.optional` / `.endoptional` (short: `.opt` / `.endopt`) for function boundary detection.
+- An assembler uses `.optional` / `.endoptional` (short: `.opt` / `.endopt`) for function boundary detection. Only the outermost `.optional` block matters — nested blocks are ignored. A function starts at any label inside the block that is referenced from outside, and ends at its `.endoptional`. Multiple labels in the same block share the end boundary.
 - Numeric addresses in a range of 0 to 0xFFFF.
 - Debug symbols is read-only data.
 
