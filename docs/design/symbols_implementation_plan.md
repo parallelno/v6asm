@@ -11,18 +11,10 @@ Already implemented:
 - `collect_macro_debug_info()` populates macro names, source locations, and param names.
 - `record_line_address()` / `record_data_line()` helpers store per-file, per-line data.
 
-Not yet implemented:
-- JSON serialization of `DebugInfo` to `*.symbols.json`.
-- Symbol type field (`label`/`const`/`func`/`macro`/`macroparam`).
-- `func` detection via `.optional`/`.endoptional` blocks.
-- Macro param entries with default value evaluation (`value: -1` when no default).
-- CLI flag / automatic output trigger.
-- Path relativization (currently stored as-is from preprocessor).
-- Unit tests for serialization.
 
 ---
 
-## Tasks
+## Implementation Details
 
 ### 1. Add `serde` / `serde_json` to `v6_core` runtime dependencies
 
@@ -73,12 +65,7 @@ Steps:
 ### 4. Track `.optional` blocks for `func` type detection
 
 During pass 2, when entering an `.optional` block, push a marker onto a stack. When a global label is defined inside an `.optional` block, tag it as a function candidate.
-
-Options (pick one):
-- **Option A (lightweight):** Add a `HashSet<String>` named `optional_labels` to `DebugInfo`. Populate when a label is defined while `_optional_stack` is non-empty. In `build_debug_symbols`, check membership to decide `label` vs `func`.
-- **Option B (field on LabelInfo):** Add `is_func: bool` to `LabelInfo`. Set during pass 2.
-
-Option A is simpler and avoids changing the existing struct layout.
+- Add a `HashSet<String>` named `optional_labels` to `DebugInfo`. Populate when a label is defined while `_optional_stack` is non-empty. In `build_debug_symbols`, check membership to decide `label` vs `func`.
 
 ### 5. Relativize source paths
 
@@ -101,8 +88,13 @@ pub fn write_debug_symbols(json: &str, path: &Path) -> AsmResult<()>
 
 In `crates/v6asm/src/main.rs`:
 
-- Always generate `*.symbols.json` next to the ROM (no flag needed — it's part of the compilation output per the design doc).
-- Path: `rom_path.with_extension("symbols.json")`.
+- Add CLI flag `--symbols` (bool, default false), following the `--lst` pattern:
+  ```rust
+  /// Generate debug symbols file (.symbols.json) alongside the ROM
+  #[arg(long = "symbols")]
+  symbols: bool,
+  ```
+- When `--symbols` is set, generate `rom_path.with_extension("symbols.json")` (e.g. `main.rom` → `main.symbols.json`).
 - Call `generate_debug_symbols` + `write_debug_symbols` after `write_rom`.
 
 ### 8. Register module
@@ -123,21 +115,40 @@ Add `crates/v6_core/tests/debug_symbols_tests.rs` with test cases from the desig
 
 ---
 
-## Execution Order
+## Implementation Phases
 
-```
-1  Add serde deps              (Cargo.toml change)
-2  Create debug_symbols.rs     (types + build function + relativize)
-3  Register module             (lib.rs one-liner)
-4  Track optional labels       (assembler.rs — small change in pass 2)
-5  Serialize + write           (output.rs — two functions)
-6  Wire into CLI               (main.rs — ~5 lines)
-7  Unit tests                  (new test file)
-```
+### Phase 1 — Minimum Viable Symbols File
+**Goal:** Produce a `*.symbols.json` next to the ROM with labels, consts, lineAddresses, and dataLines.
 
-Steps 1–3 can be done together. Step 4 is independent. Steps 5–6 depend on 2. Step 7 depends on all prior steps.
+- [ ] **1.1** Add `serde` / `serde_json` to `v6_core` runtime dependencies (detail §1)
+- [ ] **1.2** Create `debug_symbols.rs` module with serializable types: `DebugSymbols`, `SymbolEntry`, `SymbolType`, `DataLineEntry` (detail §2)
+- [ ] **1.3** Register module in `lib.rs` (detail §8)
+- [ ] **1.4** Implement `build_debug_symbols` — convert `DebugInfo` labels and consts into `SymbolEntry` items, copy `line_addresses` and `data_lines` (detail §3)
+- [ ] **1.5** Implement `relativize` path helper (detail §5)
+- [ ] **1.6** Add `generate_debug_symbols` + `write_debug_symbols` in `output.rs` (detail §6)
+- [ ] **1.7** Wire into CLI — add `--symbols` flag, emit `*.symbols.json` when set (detail §7)
+- [ ] **1.8** Unit tests: label, const, dataLines structure, lineAddresses multi-address (detail §9, cases 1, 4, 5)
 
-## Out of Scope
-- Runtime debug state (`*.debug.json`) — separate feature.
-- Breakpoints, watchpoints — belongs to `DebugState`.
-- LSP / editor integration — consumer side, not assembler.
+### Phase 2 — Macros & Macro Params
+**Goal:** Add macro and macroparam symbol entries with default value handling.
+
+- [ ] **2.1** Extend `build_debug_symbols` to emit `macro` entries from `info.macros` (detail §3)
+- [ ] **2.2** Emit `macroparam` entries per param; evaluate default or use `-1` (detail §3)
+- [ ] **2.3** Unit tests: macro param defaults, macro with no params (detail §9, case 3)
+
+### Phase 3 — Function Detection
+**Goal:** Tag labels inside `.optional`/`.endoptional` blocks as `func` type.
+
+- [ ] **3.1** Add `optional_labels: HashSet<String>` to `DebugInfo` (detail §4)
+- [ ] **3.2** Populate `optional_labels` during pass 2 when a label is defined inside an `.optional` block (detail §4)
+- [ ] **3.3** Update `build_debug_symbols` to check membership and emit `func` vs `label` (detail §4)
+- [ ] **3.4** Unit tests: func detection, label outside optional stays `label` (detail §9, case 7)
+
+### Phase 4 — Testing suite
+**Goal:** Validate correctness across included files and local label disambiguation.
+
+- [ ] **4.1** Unit tests: multi-file project with `.include` — paths in output are relative (detail §9, case 6)
+- [ ] **4.2** Unit tests: local label disambiguation `@loop_0`, `@loop_1` (detail §9, case 2)
+- [ ] **4.3** Integration test: compile sample project, assert all three top-level sections exist with correct structure
+
+---

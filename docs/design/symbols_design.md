@@ -121,10 +121,3 @@ compiled addresses back to source code metadata, enabling source-level debugging
   }
 }
 ```
-
-### Notes
-- Static data type (symbols, lines, etc.): `DebugSymbols`
-- Static file: `*.symbols.json`
-- Runtime data type (breakpoints, watchpoints, etc): `DebugState`
-- Runtime file: `*.debug.json`
-- Umbrella terminology for both static and runtime: Debug Info
