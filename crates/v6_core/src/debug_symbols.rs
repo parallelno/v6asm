@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::assembler::DebugInfo;
+use crate::symbols::SymbolTable;
 
 // ── Serializable output types ───────────────────────────────────────────────
 
@@ -45,12 +46,12 @@ pub struct DataLineEntry {
 
 // ── Builder ─────────────────────────────────────────────────────────────────
 
-pub fn build_debug_symbols(info: &DebugInfo, project_dir: &Path) -> DebugSymbols {
-    let mut symbols = HashMap::new();
+pub fn build_debug_symbols(info: &DebugInfo, symbols: &SymbolTable, project_dir: &Path) -> DebugSymbols {
+    let mut syms = HashMap::new();
 
     // Labels
     for (name, label) in &info.labels {
-        symbols.insert(name.clone(), SymbolEntry {
+        syms.insert(name.clone(), SymbolEntry {
             value: label.addr as i64,
             path: relativize(&label.src, project_dir),
             line: label.line,
@@ -60,12 +61,39 @@ pub fn build_debug_symbols(info: &DebugInfo, project_dir: &Path) -> DebugSymbols
 
     // Consts (includes variables recorded as consts)
     for (name, cst) in &info.consts {
-        symbols.insert(name.clone(), SymbolEntry {
+        syms.insert(name.clone(), SymbolEntry {
             value: cst.value,
             path: relativize(&cst.src, project_dir),
             line: cst.line,
             sym_type: SymbolType::Const,
         });
+    }
+
+    // Macros and macro params
+    let all_macros = symbols.all_macros();
+    for (name, macro_debug) in &info.macros {
+        syms.insert(name.clone(), SymbolEntry {
+            value: -1,
+            path: relativize(&macro_debug.src, project_dir),
+            line: macro_debug.line,
+            sym_type: SymbolType::Macro,
+        });
+
+        // Emit macroparam entries — get defaults from MacroDef
+        if let Some(macro_def) = all_macros.get(name) {
+            for param in &macro_def.params {
+                let key = format!("{}.{}", name, param.name);
+                let value = param.default.as_ref()
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .unwrap_or(-1);
+                syms.insert(key, SymbolEntry {
+                    value,
+                    path: relativize(&macro_debug.src, project_dir),
+                    line: macro_debug.line,
+                    sym_type: SymbolType::MacroParam,
+                });
+            }
+        }
     }
 
     // line_addresses — relativize paths
@@ -95,7 +123,7 @@ pub fn build_debug_symbols(info: &DebugInfo, project_dir: &Path) -> DebugSymbols
         .collect();
 
     DebugSymbols {
-        symbols,
+        symbols: syms,
         line_addresses,
         data_lines,
     }

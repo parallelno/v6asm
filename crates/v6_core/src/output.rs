@@ -97,7 +97,7 @@ pub fn write_listing(listing: &str, path: &Path) -> AsmResult<()> {
 
 /// Generate debug symbols JSON from assembled data
 pub fn generate_debug_symbols(asm: &Assembler) -> AsmResult<String> {
-    let debug_symbols = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let debug_symbols = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
     serde_json::to_string_pretty(&debug_symbols)
         .map_err(|e| AsmError::new(format!("Failed to serialize debug symbols: {}", e)))
 }

@@ -70,7 +70,7 @@ Start:
     nop
 ")]);
     let asm = proj.assemble().unwrap();
-    let ds = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
 
     let entry = ds.symbols.get("Start").expect("Start label missing");
     assert_eq!(entry.value, 0x100);
@@ -87,7 +87,7 @@ MAX_SIZE = 64
     nop
 ")]);
     let asm = proj.assemble().unwrap();
-    let ds = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
 
     let entry = ds.symbols.get("MAX_SIZE").expect("MAX_SIZE const missing");
     assert_eq!(entry.value, 64);
@@ -104,7 +104,7 @@ counter .var 10
     nop
 ")]);
     let asm = proj.assemble().unwrap();
-    let ds = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
 
     let entry = ds.symbols.get("counter").expect("counter var missing");
     assert_eq!(entry.value, 10);
@@ -121,7 +121,7 @@ fn data_lines_byte_directive() {
 .byte 1, 2, 3
 ")]);
     let asm = proj.assemble().unwrap();
-    let ds = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
 
     let file_data = ds.data_lines.get("main.asm").expect("main.asm data_lines missing");
     let entry = file_data.get(&2).expect("line 2 data missing");
@@ -137,7 +137,7 @@ fn data_lines_word_directive() {
 .word 0x1234, 0x5678
 ")]);
     let asm = proj.assemble().unwrap();
-    let ds = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
 
     let file_data = ds.data_lines.get("main.asm").expect("main.asm data_lines missing");
     let entry = file_data.get(&2).expect("line 2 data missing");
@@ -155,7 +155,7 @@ fn line_addresses_single_instruction() {
     nop
 ")]);
     let asm = proj.assemble().unwrap();
-    let ds = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
 
     let file_addrs = ds.line_addresses.get("main.asm").expect("main.asm line_addresses missing");
     let addrs = file_addrs.get(&2).expect("line 2 address missing");
@@ -172,7 +172,7 @@ fn line_addresses_multiple_entries() {
 .endloop
 ")]);
     let asm = proj.assemble().unwrap();
-    let ds = build_debug_symbols(&asm.debug_info, asm.project_dir());
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
 
     let file_addrs = ds.line_addresses.get("main.asm").expect("main.asm line_addresses missing");
     let addrs = file_addrs.get(&3).expect("line 3 addresses missing");
@@ -225,4 +225,114 @@ Start:
     let max = symbols.get("MAX").unwrap();
     assert_eq!(max["type"], "const");
     assert_eq!(max["value"], 42);
+}
+
+// ── macro and macroparam symbols ────────────────────────────────────────────
+
+#[test]
+fn macro_symbol_entry() {
+    let proj = TestProject::new(&[("main.asm", "\
+.macro PrintChar (ch)
+    mvi a, ch
+.endmacro
+.org 0x100
+    PrintChar(65)
+")]);
+    let asm = proj.assemble().unwrap();
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
+
+    let entry = ds.symbols.get("PrintChar").expect("PrintChar macro missing");
+    assert_eq!(entry.value, -1);
+    assert_eq!(entry.sym_type, SymbolType::Macro);
+    assert_eq!(entry.path, "main.asm");
+    assert_eq!(entry.line, 1);
+}
+
+#[test]
+fn macroparam_no_default() {
+    let proj = TestProject::new(&[("main.asm", "\
+.macro PrintChar (ch)
+    mvi a, ch
+.endmacro
+.org 0x100
+    PrintChar(65)
+")]);
+    let asm = proj.assemble().unwrap();
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
+
+    let entry = ds.symbols.get("PrintChar.ch").expect("PrintChar.ch macroparam missing");
+    assert_eq!(entry.value, -1);
+    assert_eq!(entry.sym_type, SymbolType::MacroParam);
+    assert_eq!(entry.path, "main.asm");
+    assert_eq!(entry.line, 1);
+}
+
+#[test]
+fn macroparam_with_default() {
+    let proj = TestProject::new(&[("main.asm", "\
+.macro SetColor (col=7)
+    mvi a, col
+.endmacro
+.org 0x100
+    SetColor()
+")]);
+    let asm = proj.assemble().unwrap();
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
+
+    let entry = ds.symbols.get("SetColor.col").expect("SetColor.col macroparam missing");
+    assert_eq!(entry.value, 7);
+    assert_eq!(entry.sym_type, SymbolType::MacroParam);
+}
+
+#[test]
+fn macro_multiple_params_mixed_defaults() {
+    let proj = TestProject::new(&[("main.asm", "\
+.macro Draw (x, y, color=3)
+    mvi a, x
+    mvi b, y
+    mvi c, color
+.endmacro
+.org 0x100
+    Draw(10, 20)
+")]);
+    let asm = proj.assemble().unwrap();
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
+
+    // macro entry
+    let m = ds.symbols.get("Draw").expect("Draw macro missing");
+    assert_eq!(m.sym_type, SymbolType::Macro);
+    assert_eq!(m.value, -1);
+
+    // params
+    let x = ds.symbols.get("Draw.x").expect("Draw.x missing");
+    assert_eq!(x.value, -1);
+    assert_eq!(x.sym_type, SymbolType::MacroParam);
+
+    let y = ds.symbols.get("Draw.y").expect("Draw.y missing");
+    assert_eq!(y.value, -1);
+
+    let color = ds.symbols.get("Draw.color").expect("Draw.color missing");
+    assert_eq!(color.value, 3);
+    assert_eq!(color.sym_type, SymbolType::MacroParam);
+}
+
+#[test]
+fn macro_no_params() {
+    let proj = TestProject::new(&[("main.asm", "\
+.macro DoNothing
+    nop
+.endmacro
+.org 0x100
+    DoNothing
+")]);
+    let asm = proj.assemble().unwrap();
+    let ds = build_debug_symbols(&asm.debug_info, &asm.symbols, asm.project_dir());
+
+    let entry = ds.symbols.get("DoNothing").expect("DoNothing macro missing");
+    assert_eq!(entry.value, -1);
+    assert_eq!(entry.sym_type, SymbolType::Macro);
+
+    // No macroparam entries should exist for this macro
+    let param_keys: Vec<_> = ds.symbols.keys().filter(|k| k.starts_with("DoNothing.")).collect();
+    assert!(param_keys.is_empty(), "expected no macroparam entries, got {:?}", param_keys);
 }

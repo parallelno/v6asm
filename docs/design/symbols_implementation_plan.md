@@ -159,9 +159,9 @@ Add `crates/v6_core/tests/debug_symbols_tests.rs` with test cases from the desig
 ### Phase 2 — Macros & Macro Params
 **Goal:** Add macro and macroparam symbol entries with default value handling.
 
-- [ ] **2.1** Extend `build_debug_symbols` to emit `macro` entries from `info.macros` (detail §3)
-- [ ] **2.2** Emit `macroparam` entries per param; evaluate default or use `-1` (detail §3)
-- [ ] **2.3** Unit tests: macro param defaults, macro with no params (detail §9, case 3)
+- [x] **2.1** Extend `build_debug_symbols` to emit `macro` entries from `info.macros` (detail §3)
+- [x] **2.2** Emit `macroparam` entries per param; evaluate default or use `-1` (detail §3)
+- [x] **2.3** Unit tests: macro param defaults, macro with no params (detail §9, case 3)
 
 ### Phase 3 — Function Detection
 **Goal:** Tag labels inside `.optional`/`.endoptional` blocks as `func` type.
