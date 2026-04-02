@@ -9,7 +9,15 @@
 
 ## Overview
 
-`v6asm` is a command-line toolchain for the **Vector-06c** (Вектор-06Ц). It assembles `.asm` source files into `.rom` binaries and can build bootable **FDD disk images** for an emulator.
+`v6asm` is a command-line toolchain for the **Vector-06c** (Вектор-06Ц).
+It assembles `.asm` source files into `.rom` binaries and can build bootable **FDD disk images** for an emulator.
+
+The assembler runs two passes — the first collects symbols and sizes, the second
+emits machine code with all forward references resolved. It supports the full
+Intel 8080 instruction set and an optional Z80 mnemonic alternatives.
+A rich preprocessor handles file includes, macros, conditional
+assembly, loops, and optional code blocks. The toolchain can also emit a listing file
+for inspection and a `.symbols.json` for editor/debugger integration.
 
 | Tool | Purpose |
 |------|---------|
