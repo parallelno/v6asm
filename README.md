@@ -34,8 +34,6 @@ listing file for inspection and a `.symbols.json` for editor/debugger integratio
 
 ## Installation
 
-### Prebuilt release
-
 Download the latest archive from [Releases]
 (https://github.com/parallelno/v6asm/releases),
 extract it, and add the directory to your `PATH`.
