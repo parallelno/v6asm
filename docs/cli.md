@@ -10,23 +10,37 @@ v6asm --init <name>
 | Argument | Description |
 |----------|-------------|
 | `<source>` | Assembly source file (`.asm`) to compile |
-| `--init <name>` | Scaffold a new `.asm` file with a starter template |
+| `-i`, `--init <name>` | Scaffold a new `.asm` file with a starter template |
 | `-o`, `--output <path>` | Output ROM path (default: `<source>.rom`) |
-| `--cpu <cpu>` | Target CPU: `i8080` (default) or `z80` |
-| `--rom-align <n>` | ROM size alignment in bytes (default: `1`) |
+| `-c`, `--cpu <cpu>` | Target CPU: `i8080` (default) or `z80` |
+| `-a`, `--rom-align <n>` | ROM size alignment in bytes (default: `1`) |
 | `-q`, `--quiet` | Suppress `.print` output |
-| `-v`, `--verbose` | Extra diagnostics |
-| `--lst` | Generate a listing file (`.lst`) alongside the ROM |
-| `--symbols` | Generate a debug symbols file (`.symbols.json`) alongside the ROM |
+| `-V`, `--verbose` | Extra diagnostics |
+| `-l`, `--lst` | Generate a listing file (`.lst`) alongside the ROM |
+| `-s`, `--symbols` | Generate a debug symbols file (`.symbols.json`) alongside the ROM |
+| `-v`, `--version` | Print the build version string |
+| `-h`, `--help` | Print help with the program header |
+
+## Help And Version
+
+`-v` / `--version` prints the build version in the form `YYYY.MM.DD-<git-hash>`.
+
+`-h` / `--help` prints the normal clap-generated help preceded by:
+
+```text
+Intel 8080/Z80 assembler, version <version>
+(c) Aleksandr Fedotovskikh <mailforfriend@gmail.com>
+```
 
 ## Examples
 
 ```bash
 v6asm main.asm                        # compile, output main.rom
+v6asm -i main                         # create main.asm from template
 v6asm main.asm -o out/program.rom     # custom output path
-v6asm main.asm --cpu z80 --lst        # Z80 mode + listing
-v6asm main.asm --symbols              # generate debug symbols
-v6asm --init main                     # create main.asm from template
+v6asm main.asm -c z80 -l              # Z80 mode + listing
+v6asm main.asm -s                     # generate debug symbols
+v6asm -v                              # print version
 ```
 
 ## Output Artifacts

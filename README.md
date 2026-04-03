@@ -5,11 +5,12 @@
 ## Quick Start
 
 ```bash
-v6asm --init main              # scaffold a new project
+v6asm -i main                  # scaffold a new project
 v6asm main.asm                 # assemble → main.rom
-v6asm main.asm --lst           # + listing file
-v6asm main.asm --symbols       # + debug symbols
-v6asm main.asm --cpu z80       # Z80 mnemonic mode
+v6asm main.asm -l              # + listing file
+v6asm main.asm -s              # + debug symbols
+v6asm main.asm -c z80          # Z80 mnemonic mode
+v6asm -v                       # print build version
 ```
 
 [![CI/CD](https://github.com/parallelno/v6asm/actions/workflows/ci.yml/badge.svg)](https://github.com/parallelno/v6asm/actions/workflows/ci.yml)

@@ -82,6 +82,7 @@ Describes lines that emit contiguous data bytes (`.byte`/`.db`, `.word`/`.dw`, e
 | Macro param `ch` of `PrintChar` | `PrintChar.ch` |
 
 Local labels are disambiguated by a zero-based occurrence index within the file.
+The original spelling of the definition is preserved in the JSON keys.
 
 ---
 

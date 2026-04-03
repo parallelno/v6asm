@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use v6_core::assembler::Assembler;
 use v6_core::debug_symbols::{build_debug_symbols, relativize, SymbolType};
 use v6_core::diagnostics::AsmError;
-use v6_core::output::generate_debug_symbols;
+use v6_core::output::{generate_debug_symbols, generate_listing, generate_rom, RomConfig};
 use v6_core::preprocessor::preprocess;
 use v6_core::project::CpuMode;
 use v6_core::symbols::SymbolTable;
@@ -225,6 +225,57 @@ Start:
     let max = symbols.get("MAX").unwrap();
     assert_eq!(max["type"], "const");
     assert_eq!(max["value"], 42);
+}
+
+#[test]
+fn symbol_lookup_is_case_insensitive_and_outputs_preserve_original_case() {
+    let proj = TestProject::new(&[("main.asm", "\
+.org 0x100
+MixedLabel:
+    jmp mixedlabel
+MiXeDConst = 0x1234
+    lxi h, mixedconst
+")]);
+    let asm = proj.assemble().unwrap();
+
+    let rom = generate_rom(&asm, &RomConfig::default());
+    assert_eq!(&rom[..6], &[0xC3, 0x00, 0x01, 0x21, 0x34, 0x12]);
+
+    let listing = generate_listing(&asm);
+    assert!(listing.contains("MixedLabel:"));
+    assert!(listing.contains("jmp mixedlabel"));
+    assert!(listing.contains("MiXeDConst = 0x1234"));
+    assert!(listing.contains("lxi h, mixedconst"));
+
+    let json = generate_debug_symbols(&asm).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let symbols = parsed["symbols"].as_object().unwrap();
+
+    assert!(symbols.contains_key("MixedLabel"));
+    assert!(symbols.contains_key("MiXeDConst"));
+    assert!(!symbols.contains_key("MIXEDLABEL"));
+    assert!(!symbols.contains_key("MIXEDCONST"));
+}
+
+#[test]
+fn macro_lookup_is_case_insensitive_and_symbols_json_keeps_original_case() {
+    let proj = TestProject::new(&[("main.asm", "\
+.macro DrawSprite (Color=7)
+    mvi a, Color
+.endmacro
+.org 0x100
+    drawsprite()
+")]);
+    let asm = proj.assemble().unwrap();
+
+    let json = generate_debug_symbols(&asm).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let symbols = parsed["symbols"].as_object().unwrap();
+
+    assert!(symbols.contains_key("DrawSprite"));
+    assert!(symbols.contains_key("DrawSprite.Color"));
+    assert!(!symbols.contains_key("DRAWSPRITE"));
+    assert!(!symbols.contains_key("DRAWSPRITE.COLOR"));
 }
 
 // ── macro and macroparam symbols ────────────────────────────────────────────

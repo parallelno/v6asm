@@ -12,16 +12,27 @@ use v6_core::symbols::SymbolTable;
 
 /// Embedded source template
 const TEMPLATE_ASM: &str = include_str!("templates/main.asm");
+const VERSION: &str = env!("V6ASM_VERSION");
+const ABOUT: &str = concat!(
+    "Intel 8080/Z80 assembler, version ",
+    env!("V6ASM_VERSION"),
+    "\n",
+    "(c) 1Aleksandr Fedotovskikh <mailforfriend@gmail.com>",
+);
 
 /// v6asm — Vector-06c Assembler
 #[derive(Parser)]
-#[command(name = "v6asm", about = "Assembler for Vector-06c (Intel 8080 / Z80 compatible)")]
+#[command(
+    name = "v6asm",
+    about = ABOUT,
+    disable_version_flag = true
+)]
 struct Cli {
     /// Assembly source file (.asm) to compile
     source: Option<PathBuf>,
 
     /// Initialize a new project with the given name
-    #[arg(long = "init")]
+    #[arg(short = 'i', long = "init")]
     init: Option<String>,
 
     /// Output ROM path (default: <source>.rom)
@@ -29,11 +40,11 @@ struct Cli {
     output: Option<PathBuf>,
 
     /// Target CPU: i8080 (default) or z80
-    #[arg(long = "cpu", default_value = "i8080")]
+    #[arg(short = 'c', long = "cpu", default_value = "i8080")]
     cpu: String,
 
     /// ROM size alignment in bytes
-    #[arg(long = "rom-align", default_value = "1")]
+    #[arg(short = 'a', long = "rom-align", default_value = "1")]
     rom_align: u16,
 
     /// Suppress .print output
@@ -41,22 +52,31 @@ struct Cli {
     quiet: bool,
 
     /// Extra diagnostics
-    #[arg(short = 'v', long = "verbose")]
+    #[arg(short = 'V', long = "verbose")]
     verbose: bool,
 
     /// Generate listing file (.lst) alongside the ROM
-    #[arg(long = "lst")]
+    #[arg(short = 'l', long = "lst")]
     lst: bool,
 
     /// Generate debug symbols file (.symbols.json) alongside the ROM
-    #[arg(long = "symbols")]
+    #[arg(short = 's', long = "symbols")]
     symbols: bool,
+
+    /// Print version information
+    #[arg(short = 'v', long = "version")]
+    version: bool,
 }
 
 fn main() {
     env_logger::init();
     let cli = Cli::parse();
     let started_at = Instant::now();
+
+    if cli.version {
+        println!("{}", version_string());
+        return;
+    }
 
     let result = if let Some(ref name) = cli.init {
         cmd_init(name)
@@ -75,6 +95,18 @@ fn main() {
     if cli.source.is_some() {
         eprintln!("Compilation completed in {}", format_elapsed_time(started_at.elapsed()));
     }
+}
+
+fn version_string() -> &'static str {
+    VERSION
+}
+
+#[cfg(test)]
+fn render_help_text() -> String {
+    use clap::CommandFactory;
+
+    let mut command = Cli::command();
+    command.render_help().to_string()
 }
 
 fn format_elapsed_time(elapsed: std::time::Duration) -> String {
@@ -103,7 +135,8 @@ fn print_error(e: &AsmError) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_elapsed_time;
+    use super::{format_elapsed_time, render_help_text, version_string, Cli};
+    use clap::Parser;
     use std::time::Duration;
 
     #[test]
@@ -119,6 +152,56 @@ mod tests {
     #[test]
     fn formats_hour_durations_in_hours() {
         assert_eq!(format_elapsed_time(Duration::from_secs(5400)), "1.500 hours");
+    }
+
+    #[test]
+    fn parses_requested_short_flags() {
+        let cli = Cli::try_parse_from([
+            "v6asm",
+            "main.asm",
+            "-c",
+            "z80",
+            "-a",
+            "16",
+            "-l",
+            "-s",
+            "-o",
+            "out.rom",
+            "-V",
+        ]).unwrap();
+
+        assert_eq!(cli.source.as_deref(), Some(std::path::Path::new("main.asm")));
+        assert_eq!(cli.cpu, "z80");
+        assert_eq!(cli.rom_align, 16);
+        assert!(cli.lst);
+        assert!(cli.symbols);
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn parses_init_short_flag() {
+        let cli = Cli::try_parse_from(["v6asm", "-i", "demo"]).unwrap();
+        assert_eq!(cli.init.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn parses_version_flag() {
+        let cli = Cli::try_parse_from(["v6asm", "-v"]).unwrap();
+        assert!(cli.version);
+    }
+
+    #[test]
+    fn help_text_starts_with_custom_header() {
+        let help = render_help_text();
+        assert!(help.starts_with(HELP_HEADER));
+        assert!(help.contains("-i, --init"));
+        assert!(help.contains("-v, --version"));
+    }
+
+    #[test]
+    fn version_string_comes_from_build_metadata() {
+        assert_eq!(version_string(), env!("V6ASM_VERSION"));
+        assert!(version_string().contains('-'));
     }
 }
 
