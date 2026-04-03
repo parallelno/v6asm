@@ -138,6 +138,7 @@ fn print_error(e: &AsmError) {
 #[cfg(test)]
 mod tests {
     use super::{format_elapsed_time, render_help_text, version_string, Cli};
+    use crate::ABOUT;
     use clap::Parser;
     use std::time::Duration;
 
@@ -195,7 +196,7 @@ mod tests {
     #[test]
     fn help_text_starts_with_custom_header() {
         let help = render_help_text();
-        assert!(help.starts_with(HELP_HEADER));
+        assert!(help.starts_with(ABOUT));
         assert!(help.contains("-i, --init"));
         assert!(help.contains("-v, --version"));
     }
