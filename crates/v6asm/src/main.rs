@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use v6_core::assembler::Assembler;
 use v6_core::diagnostics::{AsmError, AsmResult};
 use v6_core::output::{generate_debug_symbols, generate_listing, generate_rom, rom_start_address, write_debug_symbols, write_listing, write_rom, RomConfig};
@@ -17,7 +17,7 @@ const ABOUT: &str = concat!(
     "Intel 8080/Z80 assembler, version ",
     env!("V6ASM_VERSION"),
     "\n",
-    "(c) 1Aleksandr Fedotovskikh <mailforfriend@gmail.com>",
+    "(c) Aleksandr Fedotovskikh <mailforfriend@gmail.com>",
 );
 
 /// v6asm — Vector-06c Assembler
@@ -83,8 +83,10 @@ fn main() {
     } else if let Some(ref source_path) = cli.source {
         cmd_assemble(source_path, &cli)
     } else {
-        eprintln!("Usage: v6asm <source.asm> [options] | --init <name>");
-        process::exit(1);
+        let mut cmd = Cli::command();
+        cmd.print_help().unwrap();
+        println!();
+        return;
     };
 
     if let Err(e) = result {
