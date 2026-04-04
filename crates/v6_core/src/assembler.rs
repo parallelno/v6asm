@@ -230,24 +230,28 @@ impl Assembler {
             let line = &lines[i];
 
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
-                self.expand_macro_pass1(line, &macro_name, &args)?;
+                self.expand_macro_pass1(line, &macro_name, &args)
+                    .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
                 i += 1;
                 continue;
             }
 
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            let tokens = tokenize_line(&line.text, &line.file, line.line_num)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
             if tokens.is_empty() {
                 i += 1;
                 continue;
             }
 
-            let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
+            let parsed = parser::parse_line(&tokens, self.cpu_mode)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
             if parsed.len() == 1 {
                 if let Some(control) = Self::control_directive(&parsed[0]) {
                     match control {
                         ControlDirective::If(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::If)?;
-                            if self.eval_expr(expr)? != 0 {
+                            if self.eval_expr(expr)
+                                .map_err(|e| e.ensure_location(&line.file, line.line_num))? != 0 {
                                 self.process_lines_pass1(&lines[i + 1..end])?;
                             }
                             i = end + 1;
@@ -255,15 +259,17 @@ impl Assembler {
                         }
                         ControlDirective::Loop(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
-                            let count = self.eval_expr(expr)?;
+                            let count = self.eval_expr(expr)
+                                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
                             if count < 0 {
-                                return Err(AsmError::new("Loop count must be non-negative"));
+                                return Err(AsmError::new("Loop count must be non-negative")
+                                    .ensure_location(&line.file, line.line_num));
                             }
                             if count as usize > MAX_LOOP_ITERATIONS {
                                 return Err(AsmError::new(format!(
                                     "Loop iteration count exceeded {}",
                                     MAX_LOOP_ITERATIONS
-                                )));
+                                )).ensure_location(&line.file, line.line_num));
                             }
                             for _ in 0..count as usize {
                                 self.process_lines_pass1(&lines[i + 1..end])?;
@@ -291,7 +297,8 @@ impl Assembler {
                 }
             }
 
-            self.process_parsed_line_pass1(line, &parsed)?;
+            self.process_parsed_line_pass1(line, &parsed)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
             i += 1;
         }
         Ok(())
@@ -469,7 +476,8 @@ impl Assembler {
             let wc_before = self.output.write_count();
 
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
-                self.expand_macro_pass2(line, &macro_name, &args)?;
+                self.expand_macro_pass2(line, &macro_name, &args)
+                    .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
                 let byte_count = self.output.write_count() - wc_before;
                 self.listing_data.push(ListingLine {
                     file: line.file.clone(),
@@ -482,7 +490,8 @@ impl Assembler {
                 continue;
             }
 
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            let tokens = tokenize_line(&line.text, &line.file, line.line_num)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
             if tokens.is_empty() {
                 self.listing_data.push(ListingLine {
                     file: line.file.clone(),
@@ -495,7 +504,8 @@ impl Assembler {
                 continue;
             }
 
-            let parsed = parser::parse_line(&tokens, self.cpu_mode)?;
+            let parsed = parser::parse_line(&tokens, self.cpu_mode)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
             if parsed.len() == 1 {
                 if let Some(control) = Self::control_directive(&parsed[0]) {
                     match control {
@@ -508,7 +518,8 @@ impl Assembler {
                                 addr: self.pc,
                                 byte_count: 0,
                             });
-                            if self.eval_expr(expr)? != 0 {
+                            if self.eval_expr(expr)
+                                .map_err(|e| e.ensure_location(&line.file, line.line_num))? != 0 {
                                 self.process_lines_pass2(&lines[i + 1..end])?;
                             }
                             i = end + 1;
@@ -516,15 +527,17 @@ impl Assembler {
                         }
                         ControlDirective::Loop(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
-                            let count = self.eval_expr(expr)?;
+                            let count = self.eval_expr(expr)
+                                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
                             if count < 0 {
-                                return Err(AsmError::new("Loop count must be non-negative"));
+                                return Err(AsmError::new("Loop count must be non-negative")
+                                    .ensure_location(&line.file, line.line_num));
                             }
                             if count as usize > MAX_LOOP_ITERATIONS {
                                 return Err(AsmError::new(format!(
                                     "Loop iteration count exceeded {}",
                                     MAX_LOOP_ITERATIONS
-                                )));
+                                )).ensure_location(&line.file, line.line_num));
                             }
                             self.listing_data.push(ListingLine {
                                 file: line.file.clone(),
@@ -575,7 +588,8 @@ impl Assembler {
                 }
             }
 
-            self.process_parsed_line_pass2(line, &parsed)?;
+            self.process_parsed_line_pass2(line, &parsed)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
             let byte_count = self.output.write_count() - wc_before;
             self.listing_data.push(ListingLine {
                 file: line.file.clone(),
@@ -735,7 +749,8 @@ impl Assembler {
                 }
             }
         }
-        Err(AsmError::new(format!("Missing {}", kind.end_directive_name())))
+        Err(AsmError::new(format!("Missing {}", kind.end_directive_name()))
+            .ensure_location(&lines[start].file, lines[start].line_num))
     }
 
     fn should_include_optional_block(&self, lines: &[SourceLine], block_start: usize, block_end: usize) -> AsmResult<bool> {

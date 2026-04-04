@@ -24,16 +24,12 @@ pub struct AsmError {
 
 impl fmt::Display for AsmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "error: {}", self.message)?;
         if let Some(loc) = &self.location {
-            write!(f, "{}: error: {}", loc, self.message)?;
-            if let Some(line) = &self.source_line {
-                write!(f, "\n  {}", line)?;
-                if loc.col > 0 {
-                    write!(f, "\n  {}^", " ".repeat(loc.col.saturating_sub(1)))?;
-                }
-            }
-        } else {
-            write!(f, "error: {}", self.message)?;
+            write!(f, "   -->   {}:{}", loc.file, loc.line)?;
+        }
+        if let Some(line) = &self.source_line {
+            write!(f, "\n  {}", line)?;
         }
         Ok(())
     }
@@ -57,6 +53,18 @@ impl AsmError {
 
     pub fn with_source_line(mut self, line: impl Into<String>) -> Self {
         self.source_line = Some(line.into());
+        self
+    }
+
+    /// Attach location only if one isn't already set.
+    pub fn ensure_location(mut self, file: &str, line: usize) -> Self {
+        if self.location.is_none() {
+            self.location = Some(SourceLocation {
+                file: file.to_string(),
+                line,
+                col: 0,
+            });
+        }
         self
     }
 }

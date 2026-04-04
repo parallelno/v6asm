@@ -125,12 +125,14 @@ fn format_elapsed_time(elapsed: std::time::Duration) -> String {
 
 fn print_error(e: &AsmError) {
     if let Some(ref loc) = e.location {
-        eprint!("{}:{}:{}: ", loc.file, loc.line, loc.col);
+        eprintln!("error: {}   -->   {}:{}", e.message, loc.file, loc.line);
+    } else {
+        eprintln!("error: {}", e.message);
     }
-    eprintln!("error: {}", e.message);
     if let Some(ref src) = e.source_line {
         eprintln!("  {}", src);
     }
+    eprintln!();
 }
 
 // ---- Init command ----

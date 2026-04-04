@@ -139,8 +139,10 @@ fn expand_includes(
 
         // Check for .include "file"
         if let Some(path_str) = parse_include_directive(trimmed) {
-            let include_path = resolve_include_path(&path_str, current_dir, project_dir)?;
-            let content = read_file(&include_path)?;
+            let include_path = resolve_include_path(&path_str, current_dir, project_dir)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+            let content = read_file(&include_path)
+                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
             let content = strip_multiline_comments(&content);
             let file_name = path_relative_to(&include_path, project_dir);
             let inc_lines = content_to_lines(&content, &file_name);
@@ -266,7 +268,7 @@ fn collect_macros(lines: &mut Vec<SourceLine>, symbols: &mut SymbolTable) -> Asm
                 if !seen.insert(key) {
                     return Err(AsmError::new(format!(
                         "Duplicate parameter '{}' in macro '{}'", p.name, name
-                    )));
+                    )).ensure_location(&lines[i].file, lines[i].line_num));
                 }
             }
             in_macro = true;
