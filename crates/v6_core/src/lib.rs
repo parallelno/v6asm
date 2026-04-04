@@ -8,6 +8,5 @@ pub mod preprocessor;
 pub mod symbols;
 pub mod encoding;
 pub mod output;
-pub mod debug_symbols;
 pub mod diagnostics;
 pub mod fdd;

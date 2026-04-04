@@ -5,7 +5,7 @@ use std::time::Instant;
 use clap::{CommandFactory, Parser};
 use v6_core::assembler::Assembler;
 use v6_core::diagnostics::{AsmError, AsmResult};
-use v6_core::output::{generate_debug_symbols, generate_listing, generate_rom, rom_start_address, write_debug_symbols, write_listing, write_rom, RomConfig};
+use v6_core::output::{generate_listing, generate_rom, rom_start_address, write_listing, write_rom, RomConfig};
 use v6_core::preprocessor;
 use v6_core::project::CpuMode;
 use v6_core::symbols::SymbolTable;
@@ -58,10 +58,6 @@ struct Cli {
     /// Generate listing file (.lst) alongside the ROM
     #[arg(short = 'l', long = "lst")]
     lst: bool,
-
-    /// Generate debug symbols file (.symbols.json) alongside the ROM
-    #[arg(short = 's', long = "symbols")]
-    symbols: bool,
 
     /// Print version information
     #[arg(short = 'v', long = "version")]
@@ -169,7 +165,6 @@ mod tests {
             "-a",
             "16",
             "-l",
-            "-s",
             "-o",
             "out.rom",
             "-V",
@@ -179,7 +174,6 @@ mod tests {
         assert_eq!(cli.cpu, "z80");
         assert_eq!(cli.rom_align, 16);
         assert!(cli.lst);
-        assert!(cli.symbols);
         assert!(cli.verbose);
     }
 
@@ -255,7 +249,6 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
     asm.original_sources = original_sources;
 
     asm.assemble(&lines)?;
-    asm.collect_macro_debug_info();
 
     // Generate ROM
     let rom_config = RomConfig {
@@ -292,16 +285,6 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
         write_listing(&listing, &lst_path)?;
         if cli.verbose {
             eprintln!("Listing written to {}", lst_path.display());
-        }
-    }
-
-    // Generate debug symbols file
-    if cli.symbols {
-        let symbols_path = rom_path.with_extension("symbols.json");
-        let json = generate_debug_symbols(&asm)?;
-        write_debug_symbols(&json, &symbols_path)?;
-        if cli.verbose {
-            eprintln!("Debug symbols written to {}", symbols_path.display());
         }
     }
 

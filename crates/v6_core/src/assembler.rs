@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::diagnostics::{AsmError, AsmResult, SourceLocation};
@@ -78,45 +77,6 @@ impl OutputBuffer {
     }
 }
 
-/// Debug info collected during assembly
-#[derive(Debug, Default)]
-pub struct DebugInfo {
-    pub labels: HashMap<String, LabelInfo>,
-    pub consts: HashMap<String, ConstInfo>,
-    pub macros: HashMap<String, MacroDebugInfo>,
-    pub line_addresses: HashMap<String, HashMap<usize, Vec<u16>>>,
-    pub data_lines: HashMap<String, HashMap<usize, DataLineInfo>>,
-    pub optional_labels: HashSet<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct LabelInfo {
-    pub addr: u16,
-    pub src: String,
-    pub line: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConstInfo {
-    pub value: i64,
-    pub line: usize,
-    pub src: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct MacroDebugInfo {
-    pub src: String,
-    pub line: usize,
-    pub params: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DataLineInfo {
-    pub addr: u16,
-    pub byte_length: usize,
-    pub unit_bytes: usize,
-}
-
 /// A single entry for the listing file
 #[derive(Debug, Clone)]
 pub struct ListingLine {
@@ -147,7 +107,6 @@ impl Default for AssemblerSettings {
 pub struct Assembler {
     pub symbols: SymbolTable,
     pub output: OutputBuffer,
-    pub debug_info: DebugInfo,
     pub listing_data: Vec<ListingLine>,
     pub original_sources: Vec<OriginalSource>,
     pub pc: u16,
@@ -164,9 +123,6 @@ pub struct Assembler {
 
     // Loop/if expansion depth tracking
     macro_depth: usize,
-
-    // Depth counter for .optional block nesting (pass 2)
-    optional_depth: usize,
 }
 
 struct OptionalBlock {
@@ -185,7 +141,6 @@ impl Assembler {
         Self {
             symbols: SymbolTable::new(),
             output: OutputBuffer::new(),
-            debug_info: DebugInfo::default(),
             listing_data: Vec::new(),
             original_sources: Vec::new(),
             pc: 0,
@@ -198,7 +153,6 @@ impl Assembler {
             _optional_stack: Vec::new(),
             _optional_blocks: Vec::new(),
             macro_depth: 0,
-            optional_depth: 0,
         }
     }
 
@@ -217,8 +171,6 @@ impl Assembler {
         // Pass 2: Generate code
         self.symbols.reset_for_pass2();
         self.symbols.reset_macro_call_count();
-        self.debug_info.line_addresses.clear();
-        self.debug_info.data_lines.clear();
         self.pc = 0;
         self.encoding = Encoding::default();
         self.pass2(lines)?;
@@ -348,9 +300,7 @@ impl Assembler {
                         }
                     }
 
-                    // Record address for this line
-                    self.record_line_address(&line.file, line.line_num, self.pc);
-                }
+                    }
                 ParsedLine::VarDef { name, expr } => {
                     let resolver = |sym: &str| -> Option<i64> {
                         self.symbols.resolve(sym)
@@ -361,7 +311,6 @@ impl Assembler {
                 }
                 ParsedLine::Instruction { mnemonic, operands, .. } => {
                     let size = self.instruction_size(mnemonic, operands)?;
-                    self.record_line_address(&line.file, line.line_num, self.pc);
                     self.pc = self.pc.wrapping_add(size as u16);
                 }
                 ParsedLine::Directive(dir) => {
@@ -377,7 +326,6 @@ impl Assembler {
             Directive::Org(expr) => {
                 let val = self.eval_expr(expr)?;
                 self.pc = val as u16;
-                self.record_line_address(file, line_num, self.pc);
             }
             Directive::Align(expr) => {
                 let alignment = self.eval_expr(expr)? as u16;
@@ -390,23 +338,18 @@ impl Assembler {
             }
             Directive::Storage { length, filler: _ } => {
                 let len = self.eval_expr(length)? as u16;
-                self.record_line_address(file, line_num, self.pc);
                 self.pc = self.pc.wrapping_add(len);
             }
             Directive::Byte(exprs) => {
-                self.record_line_address(file, line_num, self.pc);
                 self.pc = self.pc.wrapping_add(exprs.len() as u16);
             }
             Directive::Word(exprs) => {
-                self.record_line_address(file, line_num, self.pc);
                 self.pc = self.pc.wrapping_add((exprs.len() * 2) as u16);
             }
             Directive::Dword(exprs) => {
-                self.record_line_address(file, line_num, self.pc);
                 self.pc = self.pc.wrapping_add((exprs.len() * 4) as u16);
             }
             Directive::Text(items) => {
-                self.record_line_address(file, line_num, self.pc);
                 let byte_count = self.text_byte_count(items);
                 self.pc = self.pc.wrapping_add(byte_count as u16);
             }
@@ -428,15 +371,10 @@ impl Assembler {
                 }
             }
             Directive::If(_) | Directive::EndIf | Directive::Loop(_) | Directive::EndLoop => {
-                // These should have been expanded in preprocessing for simple cases
-                // For now, handle in-line during pass processing
-                self.record_line_address(file, line_num, self.pc);
             }
             Directive::Optional | Directive::EndOptional => {
-                self.record_line_address(file, line_num, self.pc);
             }
             Directive::IncBin { path, offset, length } => {
-                self.record_line_address(file, line_num, self.pc);
                 // For pass 1 we need to know the size
                 let resolved = self.resolve_file_path(path)?;
                 let file_len = std::fs::metadata(&resolved)
@@ -454,7 +392,6 @@ impl Assembler {
                 if !name.is_empty() {
                     self.symbols.define_constant(name, size, file, line_num)?;
                 }
-                self.record_line_address(file, line_num, self.pc);
             }
             Directive::Include(_) => {
                 // Should have been expanded already
@@ -595,9 +532,7 @@ impl Assembler {
                             if !self.settings.optional_enabled
                                 || self.should_include_optional_block(lines, i + 1, end)?
                             {
-                                self.optional_depth += 1;
                                 self.process_lines_pass2(&lines[i + 1..end])?;
-                                self.optional_depth -= 1;
                             }
                             // Record the closing .endoptional
                             let end_line = &lines[end];
@@ -653,27 +588,9 @@ impl Assembler {
                 ParsedLine::Empty => {}
                 ParsedLine::Label(name) => {
                     self.symbols.define_label(name, self.pc, &line.file, line.line_num)?;
-                    self.debug_info.labels.insert(name.clone(), LabelInfo {
-                        addr: self.pc,
-                        src: line.file.clone(),
-                        line: line.line_num,
-                    });
-                    if self.optional_depth > 0 {
-                        self.debug_info.optional_labels.insert(name.clone());
-                    }
                 }
                 ParsedLine::LocalLabel(name) => {
                     self.symbols.define_local_label(name, self.pc, &line.file, line.line_num)?;
-                    // Add to debug with disambiguation suffix
-                    let idx = self.debug_info.labels.iter()
-                        .filter(|(k, _)| k.starts_with(&format!("@{}_", name)))
-                        .count();
-                    let debug_name = format!("@{}_{}", name, idx);
-                    self.debug_info.labels.insert(debug_name, LabelInfo {
-                        addr: self.pc,
-                        src: line.file.clone(),
-                        line: line.line_num,
-                    });
                 }
                 ParsedLine::ConstDef { name, is_local, expr } => {
                     let val = self.eval_expr(expr)?;
@@ -687,13 +604,7 @@ impl Assembler {
                         } else {
                             self.symbols.define_constant(name, val, &line.file, line.line_num)?;
                         }
-                        self.debug_info.consts.insert(name.clone(), ConstInfo {
-                            value: val,
-                            line: line.line_num,
-                            src: line.file.clone(),
-                        });
                     }
-                    self.record_line_address(&line.file, line.line_num, self.pc);
                 }
                 ParsedLine::VarDef { name, expr } => {
                     let val = self.eval_expr(expr)?;
@@ -702,14 +613,8 @@ impl Assembler {
                     } else {
                         self.symbols.define_variable(name, val, &line.file, line.line_num)?;
                     }
-                    self.debug_info.consts.insert(name.to_string(), crate::assembler::ConstInfo {
-                        value: val,
-                        line: line.line_num,
-                        src: line.file.clone(),
-                    });
                 }
                 ParsedLine::Instruction { mnemonic, operands, expressions } => {
-                    self.record_line_address(&line.file, line.line_num, self.pc);
                     self.emit_instruction(mnemonic, operands, expressions)?;
                 }
                 ParsedLine::Directive(dir) => {
@@ -847,7 +752,6 @@ impl Assembler {
             Directive::Org(expr) => {
                 let val = self.eval_expr(expr)?;
                 self.pc = val as u16;
-                self.record_line_address(file, line_num, self.pc);
             }
             Directive::Align(expr) => {
                 let alignment = self.eval_expr(expr)? as u16;
@@ -862,21 +766,16 @@ impl Assembler {
             Directive::Storage { length, filler } => {
                 let len = self.eval_expr(length)? as u16;
                 let fill = filler.as_ref().map(|e| self.eval_expr(e)).transpose()?.map(|v| v as u8);
-                self.record_line_address(file, line_num, self.pc);
                 if let Some(f) = fill {
-                    self.record_data_line(file, line_num, self.pc, len as usize, 1);
                     for _ in 0..len {
                         self.output.write_byte(self.pc, f);
                         self.pc = self.pc.wrapping_add(1);
                     }
                 } else {
-                    self.record_data_line(file, line_num, self.pc, len as usize, 1);
                     self.pc = self.pc.wrapping_add(len);
                 }
             }
             Directive::Byte(exprs) => {
-                self.record_line_address(file, line_num, self.pc);
-                self.record_data_line(file, line_num, self.pc, exprs.len(), 1);
                 for expr in exprs {
                     let val = self.eval_expr(expr)? as u8;
                     self.output.write_byte(self.pc, val);
@@ -884,8 +783,6 @@ impl Assembler {
                 }
             }
             Directive::Word(exprs) => {
-                self.record_line_address(file, line_num, self.pc);
-                self.record_data_line(file, line_num, self.pc, exprs.len() * 2, 2);
                 for expr in exprs {
                     let val = self.eval_expr(expr)? as u16;
                     self.output.write_byte(self.pc, (val & 0xFF) as u8);
@@ -895,8 +792,6 @@ impl Assembler {
                 }
             }
             Directive::Dword(exprs) => {
-                self.record_line_address(file, line_num, self.pc);
-                self.record_data_line(file, line_num, self.pc, exprs.len() * 4, 4);
                 for expr in exprs {
                     let val = self.eval_expr(expr)? as u32;
                     for i in 0..4 {
@@ -906,7 +801,6 @@ impl Assembler {
                 }
             }
             Directive::Text(items) => {
-                self.record_line_address(file, line_num, self.pc);
                 let bytes = self.encode_text_items(items);
                 let _byte_count = bytes.len();
                 for b in bytes {
@@ -966,7 +860,6 @@ impl Assembler {
                     }));
             }
             Directive::IncBin { path, offset, length } => {
-                self.record_line_address(file, line_num, self.pc);
                 let resolved = self.resolve_file_path(path)?;
                 let data = std::fs::read(&resolved)
                     .map_err(|e| AsmError::new(format!("Cannot read {}: {}", path, e)))?;
@@ -990,14 +883,9 @@ impl Assembler {
                         self.symbols.define_constant(name, size, file, line_num)?;
                     }
                 }
-                self.record_line_address(file, line_num, self.pc);
             }
-            Directive::If(_) | Directive::EndIf | Directive::Loop(_) | Directive::EndLoop => {
-                self.record_line_address(file, line_num, self.pc);
-            }
-            Directive::Optional | Directive::EndOptional => {
-                self.record_line_address(file, line_num, self.pc);
-            }
+            Directive::If(_) | Directive::EndIf | Directive::Loop(_) | Directive::EndLoop => {}
+            Directive::Optional | Directive::EndOptional => {}
             Directive::Include(_) | Directive::MacroDef { .. } | Directive::EndMacro => {}
         }
         Ok(())
@@ -1110,37 +998,6 @@ impl Assembler {
             return Ok(p);
         }
         Err(AsmError::new(format!("Cannot find file: {}", path)))
-    }
-
-    fn record_line_address(&mut self, file: &str, line_num: usize, addr: u16) {
-        self.debug_info.line_addresses
-            .entry(file.to_string())
-            .or_default()
-            .entry(line_num)
-            .or_default()
-            .push(addr);
-    }
-
-    fn record_data_line(&mut self, file: &str, line_num: usize, addr: u16, byte_length: usize, unit_bytes: usize) {
-        self.debug_info.data_lines
-            .entry(file.to_string())
-            .or_default()
-            .insert(line_num, DataLineInfo {
-                addr,
-                byte_length,
-                unit_bytes,
-            });
-    }
-
-    /// Collect macro debug info after preprocessing
-    pub fn collect_macro_debug_info(&mut self) {
-        for (_key, def) in self.symbols.all_macros() {
-            self.debug_info.macros.insert(def.name.clone(), MacroDebugInfo {
-                src: def.file.clone(),
-                line: def.line,
-                params: def.params.iter().map(|p| p.name.clone()).collect(),
-            });
-        }
     }
 }
 
