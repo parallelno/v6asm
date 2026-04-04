@@ -7,7 +7,7 @@ use crate::expr::{eval_expr, Expr};
 use crate::instructions::{encode_instruction, ParsedOperand};
 use crate::lexer::tokenize_line;
 use crate::parser::{self, Directive, ParsedLine, PrintArg, TextItem};
-use crate::preprocessor::{SourceLine, expand_macro, parse_macro_invocation};
+use crate::preprocessor::{SourceLine, OriginalSource, expand_macro, parse_macro_invocation};
 use crate::project::CpuMode;
 use crate::symbols::SymbolTable;
 
@@ -125,6 +125,8 @@ pub struct ListingLine {
     pub text: String,
     pub addr: u16,
     pub byte_count: usize,
+    /// If this line is from a macro expansion
+    pub macro_expansion: bool,
 }
 
 /// Assembler settings that can be modified by .setting
@@ -147,6 +149,7 @@ pub struct Assembler {
     pub output: OutputBuffer,
     pub debug_info: DebugInfo,
     pub listing_data: Vec<ListingLine>,
+    pub original_sources: Vec<OriginalSource>,
     pub pc: u16,
     pub cpu_mode: CpuMode,
     pub encoding: Encoding,
@@ -184,6 +187,7 @@ impl Assembler {
             output: OutputBuffer::new(),
             debug_info: DebugInfo::default(),
             listing_data: Vec::new(),
+            original_sources: Vec::new(),
             pc: 0,
             cpu_mode,
             encoding: Encoding::default(),
@@ -476,15 +480,16 @@ impl Assembler {
             let wc_before = self.output.write_count();
 
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
+                let macro_start_pc = self.pc;
                 self.expand_macro_pass2(line, &macro_name, &args)
                     .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
-                let byte_count = self.output.write_count() - wc_before;
                 self.listing_data.push(ListingLine {
                     file: line.file.clone(),
                     line_num: line.line_num,
                     text: line.text.clone(),
-                    addr: pc_before,
-                    byte_count,
+                    addr: macro_start_pc,
+                    byte_count: 0,
+                    macro_expansion: line.macro_context.is_some(),
                 });
                 i += 1;
                 continue;
@@ -499,6 +504,7 @@ impl Assembler {
                     text: line.text.clone(),
                     addr: pc_before,
                     byte_count: 0,
+                    macro_expansion: line.macro_context.is_some(),
                 });
                 i += 1;
                 continue;
@@ -517,11 +523,22 @@ impl Assembler {
                                 text: line.text.clone(),
                                 addr: self.pc,
                                 byte_count: 0,
+                                macro_expansion: line.macro_context.is_some(),
                             });
                             if self.eval_expr(expr)
                                 .map_err(|e| e.ensure_location(&line.file, line.line_num))? != 0 {
                                 self.process_lines_pass2(&lines[i + 1..end])?;
                             }
+                            // Record the closing .endif
+                            let end_line = &lines[end];
+                            self.listing_data.push(ListingLine {
+                                file: end_line.file.clone(),
+                                line_num: end_line.line_num,
+                                text: end_line.text.clone(),
+                                addr: self.pc,
+                                byte_count: 0,
+                                macro_expansion: end_line.macro_context.is_some(),
+                            });
                             i = end + 1;
                             continue;
                         }
@@ -545,10 +562,21 @@ impl Assembler {
                                 text: line.text.clone(),
                                 addr: self.pc,
                                 byte_count: 0,
+                                macro_expansion: line.macro_context.is_some(),
                             });
                             for _ in 0..count as usize {
                                 self.process_lines_pass2(&lines[i + 1..end])?;
                             }
+                            // Record the closing .endl/.endloop
+                            let end_line = &lines[end];
+                            self.listing_data.push(ListingLine {
+                                file: end_line.file.clone(),
+                                line_num: end_line.line_num,
+                                text: end_line.text.clone(),
+                                addr: self.pc,
+                                byte_count: 0,
+                                macro_expansion: end_line.macro_context.is_some(),
+                            });
                             i = end + 1;
                             continue;
                         }
@@ -560,6 +588,7 @@ impl Assembler {
                                 text: line.text.clone(),
                                 addr: self.pc,
                                 byte_count: 0,
+                                macro_expansion: line.macro_context.is_some(),
                             });
                             if !self.settings.optional_enabled
                                 || self.should_include_optional_block(lines, i + 1, end)?
@@ -568,6 +597,16 @@ impl Assembler {
                                 self.process_lines_pass2(&lines[i + 1..end])?;
                                 self.optional_depth -= 1;
                             }
+                            // Record the closing .endoptional
+                            let end_line = &lines[end];
+                            self.listing_data.push(ListingLine {
+                                file: end_line.file.clone(),
+                                line_num: end_line.line_num,
+                                text: end_line.text.clone(),
+                                addr: self.pc,
+                                byte_count: 0,
+                                macro_expansion: end_line.macro_context.is_some(),
+                            });
                             i = end + 1;
                             continue;
                         }
@@ -580,6 +619,7 @@ impl Assembler {
                                 text: line.text.clone(),
                                 addr: self.pc,
                                 byte_count: 0,
+                                macro_expansion: line.macro_context.is_some(),
                             });
                             i += 1;
                             continue;
@@ -597,6 +637,7 @@ impl Assembler {
                 text: line.text.clone(),
                 addr: pc_before,
                 byte_count,
+                macro_expansion: line.macro_context.is_some(),
             });
             i += 1;
         }

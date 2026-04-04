@@ -241,6 +241,9 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
     };
     let lines = preprocessor::preprocess(source_path, &source_dir, &mut symbols, &read_file_fn)?;
 
+    // Collect original sources for listing
+    let original_sources = preprocessor::collect_original_sources(source_path, &source_dir, &read_file_fn)?;
+
     // Assemble
     let cpu_mode = match cli.cpu.as_str() {
         "z80" => CpuMode::Z80,
@@ -249,6 +252,7 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
     let mut asm = Assembler::new(cpu_mode, source_dir.clone());
     asm.quiet = cli.quiet;
     asm.symbols = symbols;
+    asm.original_sources = original_sources;
 
     asm.assemble(&lines)?;
     asm.collect_macro_debug_info();

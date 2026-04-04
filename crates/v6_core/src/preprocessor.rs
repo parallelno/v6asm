@@ -8,6 +8,13 @@ const MAX_MACRO_DEPTH: usize = 32;
 #[allow(dead_code)]
 const MAX_LOOP_ITERATIONS: usize = 100_000;
 
+/// Original source file content for listing generation
+#[derive(Debug, Clone)]
+pub struct OriginalSource {
+    pub file: String,
+    pub lines: Vec<String>,
+}
+
 /// A preprocessed source line with metadata
 #[derive(Debug, Clone)]
 pub struct SourceLine {
@@ -546,4 +553,51 @@ pub fn parse_macro_args(s: &str) -> Vec<String> {
         args.push(current.trim().to_string());
     }
     args
+}
+
+/// Collect original source files in listing order (main file, then includes as they appear).
+/// Each file is stored with its full text lines. The order matches how they appear in the source.
+pub fn collect_original_sources(
+    main_file: &Path,
+    project_dir: &Path,
+    read_file: &dyn Fn(&Path) -> AsmResult<String>,
+) -> AsmResult<Vec<OriginalSource>> {
+    let mut sources = Vec::new();
+    collect_sources_recursive(main_file, project_dir, read_file, &mut sources, 0)?;
+    Ok(sources)
+}
+
+fn collect_sources_recursive(
+    file: &Path,
+    project_dir: &Path,
+    read_file: &dyn Fn(&Path) -> AsmResult<String>,
+    sources: &mut Vec<OriginalSource>,
+    depth: usize,
+) -> AsmResult<()> {
+    if depth >= MAX_INCLUDE_DEPTH {
+        return Ok(());
+    }
+
+    let content = read_file(file)?;
+    let content = strip_multiline_comments(&content);
+    let file_name = path_relative_to(file, project_dir);
+    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let current_dir = file.parent().unwrap_or(project_dir);
+
+    // Store this file
+    sources.push(OriginalSource {
+        file: file_name,
+        lines: lines.clone(),
+    });
+
+    // Recurse into includes
+    for line in &lines {
+        if let Some(path_str) = parse_include_directive(line.trim()) {
+            if let Ok(include_path) = resolve_include_path(&path_str, current_dir, project_dir) {
+                collect_sources_recursive(&include_path, project_dir, read_file, sources, depth + 1)?;
+            }
+        }
+    }
+
+    Ok(())
 }
