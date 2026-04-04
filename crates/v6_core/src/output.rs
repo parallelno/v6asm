@@ -69,68 +69,92 @@ pub fn generate_listing(asm: &Assembler) -> String {
             .push(entry);
     }
 
-    for (file_idx, source) in asm.original_sources.iter().enumerate() {
-        // File separator: empty line + filepath header (no leading empty line for first file)
-        if file_idx > 0 {
-            out.push('\n');
-        }
-        out.push_str(&format!("--- {} ---\n", source.file));
-
-        let mut in_macro_def = false;
-
-        for (line_idx, line_text) in source.lines.iter().enumerate() {
-            let line_num = line_idx + 1;
-            let trimmed = line_text.trim();
-            let trimmed_upper = trimmed.to_ascii_uppercase();
-
-            // Track macro definition blocks (print as source-only)
-            if trimmed_upper.starts_with(".MACRO") && !trimmed_upper.starts_with(".MACRO_") {
-                in_macro_def = true;
-                format_source_only(&mut out, line_num, line_text);
-                continue;
-            }
-            if in_macro_def {
-                format_source_only(&mut out, line_num, line_text);
-                if trimmed_upper == ".ENDMACRO" {
-                    in_macro_def = false;
-                }
-                continue;
-            }
-
-            // .include directives: print as source-only
-            if trimmed_upper.starts_with(".INCLUDE") {
-                format_source_only(&mut out, line_num, line_text);
-                continue;
-            }
-
-            // Look up assembled data for this line
-            let key = (source.file.clone(), line_num);
-            if let Some(entries) = lookup.get(&key) {
-                // Find the "primary" entry (non-macro-expansion) for this source line
-                let primary = entries.iter().find(|e| !e.macro_expansion);
-                let macro_expanded: Vec<&&ListingLine> = entries.iter()
-                    .filter(|e| e.macro_expansion)
-                    .collect();
-
-                if let Some(entry) = primary {
-                    format_listing_line(&mut out, asm, entry, line_num, line_text);
-                } else if !entries.is_empty() {
-                    // All entries are macro expansions — this is a macro call line
-                    format_source_only(&mut out, line_num, line_text);
-                }
-
-                // Print macro expansion lines (if any)
-                for exp in &macro_expanded {
-                    format_listing_line(&mut out, asm, exp, line_num, &exp.text);
-                }
-            } else {
-                // No assembled data — just print the source line
-                format_source_only(&mut out, line_num, line_text);
-            }
-        }
-    }
+    // Walk sources recursively: original_sources is in depth-first order,
+    // so we use an index that advances as includes are encountered.
+    let mut source_idx = 0;
+    emit_source_listing(&mut out, asm, &lookup, &mut source_idx, true);
 
     out
+}
+
+/// Recursively emit listing for one source file, inlining includes at their directive position.
+fn emit_source_listing(
+    out: &mut String,
+    asm: &Assembler,
+    lookup: &HashMap<(String, usize), Vec<&ListingLine>>,
+    source_idx: &mut usize,
+    is_first: bool,
+) {
+    let idx = *source_idx;
+    if idx >= asm.original_sources.len() {
+        return;
+    }
+    let source = &asm.original_sources[idx];
+    *source_idx += 1;
+
+    // File header
+    if !is_first {
+        out.push('\n');
+    }
+    out.push_str(&format!("--- {} ---\n", source.file));
+
+    let file_name = source.file.clone();
+    let mut in_macro_def = false;
+
+    for (line_idx, line_text) in source.lines.iter().enumerate() {
+        let line_num = line_idx + 1;
+        let trimmed = line_text.trim();
+        let trimmed_upper = trimmed.to_ascii_uppercase();
+
+        // Track macro definition blocks (print as source-only)
+        if trimmed_upper.starts_with(".MACRO") && !trimmed_upper.starts_with(".MACRO_") {
+            in_macro_def = true;
+            format_source_only(out, line_num, line_text);
+            continue;
+        }
+        if in_macro_def {
+            format_source_only(out, line_num, line_text);
+            if trimmed_upper == ".ENDMACRO" {
+                in_macro_def = false;
+            }
+            continue;
+        }
+
+        // .include directives: print the directive, then inline the included file
+        if trimmed_upper.starts_with(".INCLUDE") {
+            format_source_only(out, line_num, line_text);
+            emit_source_listing(out, asm, lookup, source_idx, false);
+            // Resume header for current file after inclusion
+            out.push('\n');
+            out.push_str(&format!("--- {} ---\n", file_name));
+            continue;
+        }
+
+        // Look up assembled data for this line
+        let key = (file_name.clone(), line_num);
+        if let Some(entries) = lookup.get(&key) {
+            // Find the "primary" entry (non-macro-expansion) for this source line
+            let primary = entries.iter().find(|e| !e.macro_expansion);
+            let macro_expanded: Vec<&&ListingLine> = entries.iter()
+                .filter(|e| e.macro_expansion)
+                .collect();
+
+            if let Some(entry) = primary {
+                format_listing_line(out, asm, entry, line_num, line_text);
+            } else if !entries.is_empty() {
+                // All entries are macro expansions — this is a macro call line
+                format_source_only(out, line_num, line_text);
+            }
+
+            // Print macro expansion lines (if any)
+            for exp in &macro_expanded {
+                format_listing_line(out, asm, exp, line_num, &exp.text);
+            }
+        } else {
+            // No assembled data — just print the source line
+            format_source_only(out, line_num, line_text);
+        }
+    }
 }
 
 /// Format a source-only line (no address/bytes)
