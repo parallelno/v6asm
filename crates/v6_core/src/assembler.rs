@@ -217,6 +217,8 @@ impl Assembler {
         // Pass 2: Generate code
         self.symbols.reset_for_pass2();
         self.symbols.reset_macro_call_count();
+        self.debug_info.line_addresses.clear();
+        self.debug_info.data_lines.clear();
         self.pc = 0;
         self.encoding = Encoding::default();
         self.pass2(lines)?;
