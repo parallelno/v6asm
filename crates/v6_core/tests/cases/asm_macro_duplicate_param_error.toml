@@ -1,0 +1,15 @@
+# Macro with duplicate parameter names should produce error
+
+[files]
+"main.asm" = '''
+.macro HLT_(n=10, n=11)
+    .loop n
+        hlt
+    .endl
+.endmacro
+
+HLT_()
+'''
+
+[expect]
+error_contains = "Duplicate parameter"

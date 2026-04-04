@@ -259,6 +259,16 @@ fn collect_macros(lines: &mut Vec<SourceLine>, symbols: &mut SymbolTable) -> Asm
         }
 
         if let Some((name, params)) = parse_macro_def_line(&trimmed) {
+            // Check for duplicate parameter names
+            let mut seen = std::collections::HashSet::new();
+            for p in &params {
+                let key = p.name.to_uppercase();
+                if !seen.insert(key) {
+                    return Err(AsmError::new(format!(
+                        "Duplicate parameter '{}' in macro '{}'", p.name, name
+                    )));
+                }
+            }
             in_macro = true;
             macro_name = name;
             macro_params = params;
