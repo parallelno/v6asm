@@ -327,8 +327,8 @@ fn parse_directive(name: &str, tokens: &[LocatedToken], pos: &mut usize) -> AsmR
             Ok(Directive::Loop(expr))
         }
         "ENDLOOP" | "ENDL" => Ok(Directive::EndLoop),
-        "OPTIONAL" | "OPT" => Ok(Directive::Optional),
-        "ENDOPTIONAL" | "ENDOPT" => Ok(Directive::EndOptional),
+        "OPTIONAL" | "OPT" | "FUNCTION" | "FUNC" => Ok(Directive::Optional),
+        "ENDOPTIONAL" | "ENDOPT" | "ENDFUNCTION" | "ENDFUNC" => Ok(Directive::EndOptional),
         "SETTING" => {
             let mut pairs = Vec::new();
             while *pos < tokens.len() {
