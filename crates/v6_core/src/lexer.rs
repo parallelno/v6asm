@@ -122,9 +122,9 @@ pub fn tokenize_line(line: &str, file: &str, line_num: usize) -> AsmResult<Vec<L
             tokens.push(LocatedToken::new(Token::Number(n), file, line_num, col));
             continue;
         }
-        // Decimal numbers
+        // Decimal numbers or hex with h suffix (e.g. 0FFh, 07Fh)
         if ch.is_ascii_digit() {
-            let n = parse_decimal(&chars, &mut i)?;
+            let n = parse_decimal_or_hex_h(&chars, &mut i)?;
             tokens.push(LocatedToken::new(Token::Number(n), file, line_num, col));
             continue;
         }
@@ -238,8 +238,23 @@ fn parse_identifier(chars: &[char], i: &mut usize) -> String {
     chars[start..*i].iter().collect()
 }
 
-fn parse_decimal(chars: &[char], i: &mut usize) -> AsmResult<i64> {
+fn parse_decimal_or_hex_h(chars: &[char], i: &mut usize) -> AsmResult<i64> {
     let start = *i;
+    // Scan forward collecting all hex digits and underscores
+    while *i < chars.len() && (chars[*i].is_ascii_hexdigit() || chars[*i] == '_') {
+        *i += 1;
+    }
+    // Check for trailing 'h'/'H' suffix not followed by an ident char
+    if *i < chars.len() && (chars[*i] == 'h' || chars[*i] == 'H')
+        && (*i + 1 >= chars.len() || !is_ident_char(chars[*i + 1]))
+    {
+        let s: String = chars[start..*i].iter().filter(|c| **c != '_').collect();
+        *i += 1; // skip 'h'/'H'
+        return i64::from_str_radix(&s, 16)
+            .map_err(|_| AsmError::new(format!("Invalid hex number: {}h", s)));
+    }
+    // Not hex-h notation — rewind and parse as plain decimal
+    *i = start;
     while *i < chars.len() && (chars[*i].is_ascii_digit() || chars[*i] == '_') {
         *i += 1;
     }
@@ -361,4 +376,3 @@ fn parse_char_literal(chars: &[char], i: &mut usize, file: &str, line_num: usize
     *i += 1; // skip closing '
     Ok(ch)
 }
-

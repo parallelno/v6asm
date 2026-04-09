@@ -116,3 +116,76 @@ fn test_inline_multiline_comment() {
     let tokens = tokenize_line("mvi a, 5 /* comment */ mvi b, 6", "test", 1).unwrap();
     assert_eq!(tokens.len(), 8);
 }
+
+#[test]
+fn test_hex_h_suffix() {
+    let tokens = tokenize_line("07Fh", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0x7F));
+}
+
+#[test]
+fn test_hex_h_suffix_080h() {
+    let tokens = tokenize_line("080h", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0x80));
+}
+
+#[test]
+fn test_hex_h_suffix_0ffh() {
+    let tokens = tokenize_line("0FFh", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0xFF));
+}
+
+#[test]
+fn test_hex_h_suffix_zero() {
+    let tokens = tokenize_line("0h", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0));
+}
+
+#[test]
+fn test_hex_h_suffix_single_digit() {
+    let tokens = tokenize_line("7h", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(7));
+}
+
+#[test]
+fn test_hex_h_suffix_uppercase() {
+    let tokens = tokenize_line("0FFH", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0xFF));
+}
+
+#[test]
+fn test_hex_h_suffix_16bit() {
+    let tokens = tokenize_line("0ABCDh", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0xABCD));
+}
+
+#[test]
+fn test_hex_h_suffix_with_underscores() {
+    let tokens = tokenize_line("0F_Fh", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0xFF));
+}
+
+#[test]
+fn test_decimal_still_works_with_hex_h() {
+    let tokens = tokenize_line("1234", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(1234));
+}
+
+#[test]
+fn test_hex_h_in_instruction() {
+    let tokens = tokenize_line("mvi a, 07Fh", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[0].value, Token::Identifier("mvi".to_string()));
+    assert_eq!(tokens[1].value, Token::Identifier("a".to_string()));
+    assert_eq!(tokens[2].value, Token::Comma);
+    assert_eq!(tokens[3].value, Token::Number(0x7F));
+}
