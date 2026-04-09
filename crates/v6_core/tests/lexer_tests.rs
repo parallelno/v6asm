@@ -189,3 +189,74 @@ fn test_hex_h_in_instruction() {
     assert_eq!(tokens[2].value, Token::Comma);
     assert_eq!(tokens[3].value, Token::Number(0x7F));
 }
+
+#[test]
+fn test_hex_h_suffix_10h() {
+    // 10h is 0x10=16, not decimal 10
+    let tokens = tokenize_line("10h", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0x10));
+}
+
+#[test]
+fn test_hex_h_suffix_lowercase_digits() {
+    let tokens = tokenize_line("0ah", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0x0A));
+}
+
+#[test]
+fn test_hex_h_suffix_mixed_case_digits() {
+    let tokens = tokenize_line("0Ah", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0x0A));
+}
+
+#[test]
+fn test_hex_h_suffix_full_16bit() {
+    let tokens = tokenize_line("0FFFFh", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0xFFFF));
+}
+
+#[test]
+fn test_hex_h_suffix_no_leading_zero() {
+    // 100h = 0x100 = 256, starts with non-zero digit
+    let tokens = tokenize_line("100h", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0x100));
+}
+
+#[test]
+fn test_hex_h_suffix_00h() {
+    let tokens = tokenize_line("00h", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0));
+}
+
+#[test]
+fn test_hex_h_suffix_0bh() {
+    // 0Bh should be hex 11, not binary (0b prefix requires 0/1 after b)
+    let tokens = tokenize_line("0Bh", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, Token::Number(0x0B));
+}
+
+#[test]
+fn test_hex_h_in_expression() {
+    let tokens = tokenize_line("07Fh+1", "test", 1).unwrap();
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].value, Token::Number(0x7F));
+    assert_eq!(tokens[1].value, Token::Operator("+".to_string()));
+    assert_eq!(tokens[2].value, Token::Number(1));
+}
+
+#[test]
+fn test_hex_h_not_parsed_when_followed_by_ident() {
+    // "0FFhello" should NOT be parsed as 0xFF; the h is part of a longer word
+    let tokens = tokenize_line("0FFhello", "test", 1).unwrap();
+    // Should parse as decimal 0 + identifier "FFhello"
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].value, Token::Number(0));
+    assert_eq!(tokens[1].value, Token::Identifier("FFhello".to_string()));
+}
