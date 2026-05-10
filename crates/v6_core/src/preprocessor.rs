@@ -61,16 +61,75 @@ fn path_relative_to(file: &Path, base: &Path) -> String {
 }
 
 fn content_to_lines(content: &str, file_name: &str) -> Vec<SourceLine> {
-    content
-        .lines()
-        .enumerate()
-        .map(|(i, line)| SourceLine {
-            file: file_name.to_string(),
-            line_num: i + 1,
-            text: line.to_string(),
-            macro_context: None,
-        })
-        .collect()
+    let mut result = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let line_num = i + 1;
+        for part in split_on_backslash(line) {
+            result.push(SourceLine {
+                file: file_name.to_string(),
+                line_num,
+                text: part,
+                macro_context: None,
+            });
+        }
+    }
+    result
+}
+
+/// Split a physical source line on `\` line separators, ignoring backslashes
+/// inside string/char literals or after a line-comment marker (`;` or `//`).
+fn split_on_backslash(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut string_char = '"';
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if in_string {
+            if c == '\\' && i + 1 < chars.len() {
+                // Skip escaped character inside the string/char literal.
+                i += 2;
+                continue;
+            }
+            if c == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Enter a string or char literal.
+        if c == '"' || c == '\'' {
+            in_string = true;
+            string_char = c;
+            i += 1;
+            continue;
+        }
+
+        // Line comment — everything after this stays attached to the current part.
+        if c == ';' {
+            break;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            break;
+        }
+
+        if c == '\\' {
+            parts.push(chars[start..i].iter().collect());
+            i += 1;
+            start = i;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    parts.push(chars[start..].iter().collect());
+    parts
 }
 
 pub fn strip_multiline_comments(content: &str) -> String {
@@ -600,4 +659,74 @@ fn collect_sources_recursive(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_basic() {
+        assert_eq!(split_on_backslash("a"), vec!["a".to_string()]);
+        assert_eq!(
+            split_on_backslash("mvi a,1 \\ mvi b,2"),
+            vec!["mvi a,1 ".to_string(), " mvi b,2".to_string()]
+        );
+        assert_eq!(
+            split_on_backslash("a \\ b \\ c"),
+            vec!["a ".to_string(), " b ".to_string(), " c".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_ignores_backslash_in_strings() {
+        assert_eq!(
+            split_on_backslash(".text \"hello\\nworld\""),
+            vec![".text \"hello\\nworld\"".to_string()]
+        );
+        assert_eq!(
+            split_on_backslash("mvi a, '\\n' \\ ret"),
+            vec!["mvi a, '\\n' ".to_string(), " ret".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_ignores_backslash_after_line_comment() {
+        assert_eq!(
+            split_on_backslash("nop ; foo \\ bar"),
+            vec!["nop ; foo \\ bar".to_string()]
+        );
+        assert_eq!(
+            split_on_backslash("nop // foo \\ bar"),
+            vec!["nop // foo \\ bar".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_trailing_and_leading() {
+        // Trailing backslash yields an empty trailing fragment.
+        assert_eq!(
+            split_on_backslash("nop \\"),
+            vec!["nop ".to_string(), "".to_string()]
+        );
+        // Leading backslash yields an empty leading fragment.
+        assert_eq!(
+            split_on_backslash("\\ nop"),
+            vec!["".to_string(), " nop".to_string()]
+        );
+    }
+
+    #[test]
+    fn content_to_lines_preserves_line_num_across_split() {
+        let out = content_to_lines("nop\nmvi a,1 \\ mvi b,2\nret", "test.asm");
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].line_num, 1);
+        assert_eq!(out[0].text, "nop");
+        assert_eq!(out[1].line_num, 2);
+        assert_eq!(out[1].text, "mvi a,1 ");
+        assert_eq!(out[2].line_num, 2);
+        assert_eq!(out[2].text, " mvi b,2");
+        assert_eq!(out[3].line_num, 3);
+        assert_eq!(out[3].text, "ret");
+    }
 }

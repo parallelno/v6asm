@@ -1,0 +1,14 @@
+# Labels and constants combined with the `\` separator.
+
+[files]
+"main.asm" = '''
+.org $0100
+start: mvi a, 5 \ ret
+val = 7 \ db val
+'''
+
+[expect]
+rom = "3E 05 C9 07"
+[expect.symbols]
+start = 0x0100
+val = 7

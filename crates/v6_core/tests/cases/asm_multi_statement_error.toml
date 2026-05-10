@@ -1,0 +1,12 @@
+# Without `\`, multiple statements on one line must be a compile error.
+# Previously the assembler silently dropped the trailing tokens.
+
+[files]
+"main.asm" = '''
+.org $0100
+db 0 dw 0
+'''
+
+[expect]
+error_contains = "Unexpected token after statement"
+error_line = 2

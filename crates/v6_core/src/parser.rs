@@ -100,95 +100,127 @@ pub fn parse_line(tokens: &[LocatedToken], cpu_mode: CpuMode) -> AsmResult<Vec<P
         return Ok(results);
     }
 
+    // Parse exactly one statement after the optional labels. Each branch is
+    // responsible for advancing `pos` past everything it consumed; once the
+    // statement is parsed we require all remaining tokens on the line to be
+    // exhausted, otherwise we raise an "unexpected token" error.
+    let mut parsed_statement = false;
+
     // Check for directive (.xxx)
-    if let Some(Token::Dot) = tokens.get(pos).map(|t| &t.value) {
-        pos += 1;
-        if pos < tokens.len() {
-            if let Token::Identifier(name) = &tokens[pos].value {
-                let directive_name = name.to_uppercase();
-                pos += 1;
-                let directive = parse_directive(&directive_name, tokens, &mut pos)?;
-                results.push(ParsedLine::Directive(directive));
-                return Ok(results);
+    if !parsed_statement {
+        if let Some(Token::Dot) = tokens.get(pos).map(|t| &t.value) {
+            let dot_pos = pos;
+            pos += 1;
+            if pos < tokens.len() {
+                if let Token::Identifier(name) = &tokens[pos].value {
+                    let directive_name = name.to_uppercase();
+                    pos += 1;
+                    let directive = parse_directive(&directive_name, tokens, &mut pos)?;
+                    results.push(ParsedLine::Directive(directive));
+                    parsed_statement = true;
+                } else {
+                    pos = dot_pos;
+                }
+            } else {
+                pos = dot_pos;
             }
         }
     }
 
     // Check for constant definition: NAME = expr, NAME EQU expr, NAME: = expr, NAME: EQU expr
-    if let Some(Token::Identifier(name)) = tokens.get(pos).map(|t| &t.value) {
-        let name = name.clone();
-        // Allow optional colon for label-style definitions: NAME: = expr or NAME: EQU expr
-        let mut op_pos = pos + 1;
-        if let Some(Token::Colon) = tokens.get(op_pos).map(|t| &t.value) {
-            op_pos += 1;
-        }
-        if let Some(next) = tokens.get(op_pos).map(|t| &t.value) {
-            if matches!(next, Token::Operator(ref s) if s == "=") {
-                let (expr, _consumed) = parse_expr_from(tokens, op_pos + 1)?;
-                results.push(ParsedLine::ConstDef {
-                    name,
-                    is_local: false,
-                    expr,
-                });
-                return Ok(results);
+    if !parsed_statement {
+        if let Some(Token::Identifier(name)) = tokens.get(pos).map(|t| &t.value) {
+            let name = name.clone();
+            // Allow optional colon for label-style definitions: NAME: = expr or NAME: EQU expr
+            let mut op_pos = pos + 1;
+            if let Some(Token::Colon) = tokens.get(op_pos).map(|t| &t.value) {
+                op_pos += 1;
             }
-            if matches!(next, Token::Identifier(ref s) if s.to_uppercase() == "EQU") {
-                let (expr, _consumed) = parse_expr_from(tokens, op_pos + 1)?;
-                results.push(ParsedLine::ConstDef {
-                    name,
-                    is_local: false,
-                    expr,
-                });
-                return Ok(results);
-            }
-        }
-
-        // Check for NAME .filesize "path"
-        if let Some(Token::Dot) = tokens.get(pos + 1).map(|t| &t.value) {
-            if let Some(Token::Identifier(dname)) = tokens.get(pos + 2).map(|t| &t.value) {
-                if dname.to_uppercase() == "FILESIZE" {
-                    pos += 3;
-                    let path = parse_string_arg(tokens, &mut pos)?;
-                    results.push(ParsedLine::Directive(Directive::FileSize { name, path }));
-                    return Ok(results);
+            if let Some(next) = tokens.get(op_pos).map(|t| &t.value) {
+                if matches!(next, Token::Operator(ref s) if s == "=") {
+                    let (expr, consumed) = parse_expr_from(tokens, op_pos + 1)?;
+                    pos = op_pos + 1 + consumed;
+                    results.push(ParsedLine::ConstDef {
+                        name: name.clone(),
+                        is_local: false,
+                        expr,
+                    });
+                    parsed_statement = true;
+                } else if matches!(next, Token::Identifier(ref s) if s.to_uppercase() == "EQU") {
+                    let (expr, consumed) = parse_expr_from(tokens, op_pos + 1)?;
+                    pos = op_pos + 1 + consumed;
+                    results.push(ParsedLine::ConstDef {
+                        name: name.clone(),
+                        is_local: false,
+                        expr,
+                    });
+                    parsed_statement = true;
                 }
-                if dname.to_uppercase() == "VAR" {
-                    pos += 3;
-                    let (expr, _) = parse_expr_from(tokens, pos)?;
-                    results.push(ParsedLine::VarDef { name, expr });
-                    return Ok(results);
+            }
+
+            // Check for NAME .filesize "path" / NAME .var expr
+            if !parsed_statement {
+                if let Some(Token::Dot) = tokens.get(pos + 1).map(|t| &t.value) {
+                    if let Some(Token::Identifier(dname)) = tokens.get(pos + 2).map(|t| &t.value) {
+                        if dname.to_uppercase() == "FILESIZE" {
+                            pos += 3;
+                            let path = parse_string_arg(tokens, &mut pos)?;
+                            results.push(ParsedLine::Directive(Directive::FileSize { name: name.clone(), path }));
+                            parsed_statement = true;
+                        } else if dname.to_uppercase() == "VAR" {
+                            pos += 3;
+                            let (expr, consumed) = parse_expr_from(tokens, pos)?;
+                            pos += consumed;
+                            results.push(ParsedLine::VarDef { name: name.clone(), expr });
+                            parsed_statement = true;
+                        }
+                    }
                 }
             }
         }
     }
 
     // Check for local constant: @name = expr or @name: = expr
-    if let Some(Token::At) = tokens.get(pos).map(|t| &t.value) {
-        if let Some(Token::Identifier(name)) = tokens.get(pos + 1).map(|t| &t.value) {
-            let name = name.clone();
-            let mut check_pos = pos + 2;
-            // Skip optional colon
-            if let Some(Token::Colon) = tokens.get(check_pos).map(|t| &t.value) {
-                check_pos += 1;
-            }
-            if let Some(Token::Operator(ref s)) = tokens.get(check_pos).map(|t| &t.value) {
-                if s == "=" {
-                    let (expr, _) = parse_expr_from(tokens, check_pos + 1)?;
-                    results.push(ParsedLine::ConstDef {
-                        name,
-                        is_local: true,
-                        expr,
-                    });
-                    return Ok(results);
+    if !parsed_statement {
+        if let Some(Token::At) = tokens.get(pos).map(|t| &t.value) {
+            if let Some(Token::Identifier(name)) = tokens.get(pos + 1).map(|t| &t.value) {
+                let name = name.clone();
+                let mut check_pos = pos + 2;
+                // Skip optional colon
+                if let Some(Token::Colon) = tokens.get(check_pos).map(|t| &t.value) {
+                    check_pos += 1;
+                }
+                if let Some(Token::Operator(ref s)) = tokens.get(check_pos).map(|t| &t.value) {
+                    if s == "=" {
+                        let (expr, consumed) = parse_expr_from(tokens, check_pos + 1)?;
+                        pos = check_pos + 1 + consumed;
+                        results.push(ParsedLine::ConstDef {
+                            name,
+                            is_local: true,
+                            expr,
+                        });
+                        parsed_statement = true;
+                    }
                 }
             }
         }
     }
 
     // Must be an instruction or macro invocation
-    if pos < tokens.len() {
+    if !parsed_statement && pos < tokens.len() {
         let parsed_instr = parse_instruction(tokens, &mut pos, cpu_mode)?;
         results.push(parsed_instr);
+        parsed_statement = true;
+    }
+
+    // Reject leftover tokens — only one statement per logical line.
+    if parsed_statement && pos < tokens.len() {
+        let tok = &tokens[pos];
+        return Err(AsmError::new(format!(
+            "Unexpected token after statement: {:?}. Use '\\' to put multiple statements on one source line.",
+            tok.value
+        ))
+        .with_location(tok.loc.clone()));
     }
 
     if results.is_empty() {

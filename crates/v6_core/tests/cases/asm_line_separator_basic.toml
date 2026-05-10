@@ -1,0 +1,10 @@
+# Tests the `\` line separator: multiple statements on one source line.
+
+[files]
+"main.asm" = '''
+.org $0100
+mvi a, 1 \ mvi b, 2 \ ret
+'''
+
+[expect]
+rom = "3E 01 06 02 C9"
