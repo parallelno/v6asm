@@ -1,12 +1,18 @@
-name: CI/CD
+name: Release
 
 on:
-  schedule:
-    - cron: '0 0 * * *'  # once per day at 00:00 UTC
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v2026.05.10).'
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: write   # needed to create GitHub releases
 
 jobs:
   test:
@@ -14,9 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -31,12 +40,18 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Compute version
+      - name: Compute version from tag
         id: version
         run: |
-          DATE=$(date +'%Y.%m.%d')
-          HASH=$(git rev-parse --short HEAD)
-          echo "version=${DATE}-${HASH}" >> "$GITHUB_OUTPUT"
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if [[ "$TAG" != v* ]]; then
+            echo "Tag '$TAG' must start with 'v'." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing tag=${TAG} version=${VERSION}"
 
       - name: Run tests
         run: cargo test --workspace --locked
@@ -46,6 +61,7 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -64,6 +80,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.test.outputs.tag }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -113,11 +131,12 @@ jobs:
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ needs.test.outputs.version }}-${{ matrix.platform }}
+          name: v6asm-${{ needs.test.outputs.version }}-${{ matrix.platform }}
           path: v6asm-${{ needs.test.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
 
   release:
-    name: Create Release
+    name: Publish GitHub Release
     needs: [test, build]
     runs-on: ubuntu-latest
     permissions:
@@ -125,6 +144,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.test.outputs.tag }}
+          fetch-depth: 0
 
       - name: Download all archives
         uses: actions/download-artifact@v4
@@ -135,11 +157,12 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.test.outputs.tag }}
           VERSION: ${{ needs.test.outputs.version }}
         run: |
-          TAG="v${VERSION}"
-          # Create the release if it does not exist yet, then upload/overwrite assets
-          gh release view "${TAG}" 2>/dev/null || gh release create "${TAG}" \
-            --title "Release ${VERSION}" \
-            --notes "**Build:** \`${VERSION}\`"
-          gh release upload "${TAG}" artifacts/* --clobber
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "v6asm ${VERSION}" \
+              --generate-notes
+          fi
+          gh release upload "$TAG" artifacts/* --clobber
