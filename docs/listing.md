@@ -82,6 +82,20 @@ All seven `hlt` instructions share line number 62 from the source, with addresse
 
 Macro invocations are expanded similarly to loops. The listing shows each expanded instruction with the address and bytes it produces, using the line numbers from the macro definition body.
 
+## Line Separator
+
+When the `\` line separator (see [syntax.md](syntax.md#line-separator)) places several statements on one source line, each statement gets its own row in the listing — all sharing the same line number. The original source text is shown only on the first row; subsequent rows leave the source column blank so the address/bytes columns line up underneath:
+
+```
+ADDR   BYTES                    SOURCE
+0000   0A                           1  db 10 \ dw 0xFFFF, 0x4343
+0001   FF FF 43 43                  1
+0021   C1                           7  pop b \ mov m,c \ inr l \ mov m,b
+0022   71                           7
+0023   2C                           7
+0024   70                           7
+```
+
 ## Full Example
 
 ```

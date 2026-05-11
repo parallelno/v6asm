@@ -41,17 +41,22 @@ Multi-line comments are stripped during preprocessing and work correctly with st
 A backslash `\` acts as a logical line separator: a single physical source line is split into multiple statements that are compiled as if they were on consecutive lines. Each sub-statement must be a complete statement on its own.
 
 ```asm
-mvi a, 1 \ mvi b, 2 \ ret      ; three instructions on one source line
-start: mvi a, 5 \ ret           ; label + instruction + instruction
-val = 7 \ db val                ; constant definition + directive
+mvi a, 1 \ mvi b, 2 \ ret               ; three instructions on one source line
+start: mvi a, 5 \ ret                   ; label + instruction + instruction
+val = 7 \ db val                        ; constant definition + directive
+db 10 \ dw 0xFFFF, 0x4343, 0x1234       ; data directives mixed on one line
+db 1 \ db 2 \ db 3 \ .text "HELLO"      ; multiple data directives, including .text
+@to_DrawChar:
+pop b \ mov m,c \ inr l \ mov m,b \ inr l   ; comment applies to the whole line
 ```
 
 Rules:
 
 - All sub-statements share the same source line number, so diagnostics, listings and debug symbols point at the original line.
 - The separator is ignored inside string and character literals (`"a\\nb"`, `'\\n'`).
-- The separator is ignored after a line comment (`;` or `//`) — everything after a comment stays a comment.
-- Only **one** statement is allowed per logical line. Writing two statements without a separator (e.g. `db 0 dw 0`) is a compile-time error.
+- The separator is ignored after a line comment (`;` or `//`) — everything after a comment stays a comment, so a `\` inside a comment is **not** a separator.
+- A label (`name:` or `@name:`) may precede the first statement on a separated line, but additional labels between separators are not allowed — put them on their own line.
+- Only **one** statement is allowed per logical line. Writing two statements without a separator (e.g. `db 0 dw 0`) is a compile-time error: `Unexpected token after statement: ... Use '\' to put multiple statements on one source line.`
 
 ## Expressions and Operators
 

@@ -132,17 +132,28 @@ fn emit_source_listing(
         // Look up assembled data for this line
         let key = (file_name.clone(), line_num);
         if let Some(entries) = lookup.get(&key) {
-            // Find the "primary" entry (non-macro-expansion) for this source line
-            let primary = entries.iter().find(|e| !e.macro_expansion);
+            // A single physical line can produce several listing entries when
+            // the `\` line separator is used: each statement becomes its own
+            // ListingLine sharing the same (file, line_num). Emit one row per
+            // primary entry; only the first row carries the source text so
+            // bytes from later statements line up beneath it.
+            let primaries: Vec<&&ListingLine> = entries.iter()
+                .filter(|e| !e.macro_expansion)
+                .collect();
             let macro_expanded: Vec<&&ListingLine> = entries.iter()
                 .filter(|e| e.macro_expansion)
                 .collect();
 
-            if let Some(entry) = primary {
-                format_listing_line(out, asm, entry, line_num, line_text);
-            } else if !entries.is_empty() {
-                // All entries are macro expansions — this is a macro call line
-                format_source_only(out, line_num, line_text);
+            if primaries.is_empty() {
+                if !entries.is_empty() {
+                    // All entries are macro expansions — this is a macro call line
+                    format_source_only(out, line_num, line_text);
+                }
+            } else {
+                for (i, entry) in primaries.iter().enumerate() {
+                    let text = if i == 0 { line_text.as_str() } else { "" };
+                    format_listing_line(out, asm, entry, line_num, text);
+                }
             }
 
             // Print macro expansion lines (if any)
