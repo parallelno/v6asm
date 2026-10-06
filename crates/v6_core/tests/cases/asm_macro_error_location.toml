@@ -1,0 +1,21 @@
+# A fatal .error raised while expanding a macro must point at the macro
+# definition line (macros.asm), not at the call site in main.asm.
+
+[files]
+"main.asm" = '''
+.include "macros.asm"
+VALUE = 5
+CHK(VALUE)
+'''
+"macros.asm" = '''
+.macro CHK(a)
+.if a > 0
+.error "value", a, "too big"
+.endif
+.endmacro
+'''
+
+[expect]
+error_contains = "value 5 too big"
+error_file = "macros.asm"
+error_line = 3

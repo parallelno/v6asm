@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use crate::diagnostics::{AsmError, AsmResult};
-use crate::symbols::{MacroDef, MacroParam, SymbolTable};
+use crate::symbols::{MacroBodyLine, MacroDef, MacroParam, SymbolTable};
 
 const MAX_INCLUDE_DEPTH: usize = 16;
 #[allow(dead_code)]
@@ -26,6 +26,31 @@ pub struct SourceLine {
     pub text: String,
     pub macro_context: Option<String>,
     pub expansion: Vec<ExpansionSite>,
+    /// Where this line's text actually originates. `Some((file, line))` for a
+    /// macro-expanded line (the macro body line), `None` when it coincides with
+    /// `file`/`line_num`. Diagnostics use this so errors raised while expanding
+    /// a macro point at the macro definition rather than the invocation.
+    pub origin: Option<(String, usize)>,
+}
+
+impl SourceLine {
+    /// File to attribute diagnostics to: the macro definition file for an
+    /// expanded line, otherwise the line's own file.
+    pub fn diag_file(&self) -> &str {
+        match &self.origin {
+            Some((f, _)) => f.as_str(),
+            None => self.file.as_str(),
+        }
+    }
+
+    /// Line number to attribute diagnostics to: the macro definition line for
+    /// an expanded line, otherwise the line's own line number.
+    pub fn diag_line(&self) -> usize {
+        match &self.origin {
+            Some((_, l)) => *l,
+            None => self.line_num,
+        }
+    }
 }
 
 /// The kind of source expansion contributing to a line.
@@ -108,10 +133,11 @@ fn content_to_lines(content: &str, file_name: &str) -> Vec<SourceLine> {
             result.push(SourceLine {
                 file: file_name.to_string(),
                 line_num,
-            column_offset,
+                column_offset,
                 text: part,
                 macro_context: None,
                 expansion: Vec::new(),
+                origin: None,
             });
         }
     }
@@ -447,7 +473,7 @@ fn collect_macros(lines: &mut Vec<SourceLine>, symbols: &mut SymbolTable) -> Asm
     let mut in_macro = false;
     let mut macro_name = String::new();
     let mut macro_params: Vec<MacroParam> = Vec::new();
-    let mut macro_body: Vec<String> = Vec::new();
+    let mut macro_body: Vec<MacroBodyLine> = Vec::new();
     let mut macro_file = String::new();
     let mut macro_line = 0;
 
@@ -468,7 +494,11 @@ fn collect_macros(lines: &mut Vec<SourceLine>, symbols: &mut SymbolTable) -> Asm
                 in_macro = false;
                 macro_body.clear();
             } else {
-                macro_body.push(lines[i].text.clone());
+                macro_body.push(MacroBodyLine {
+                    text: lines[i].text.clone(),
+                    file: lines[i].file.clone(),
+                    line: lines[i].line_num,
+                });
             }
             i += 1;
             continue;
@@ -578,7 +608,7 @@ pub fn expand_macro(
     let mut body_text = Vec::new();
 
     for body_line in &macro_def.body {
-        let mut expanded = body_line.clone();
+        let mut expanded = body_line.text.clone();
         // Substitute parameters
         for (i, param) in macro_def.params.iter().enumerate() {
             let value = if i < args.len() && !args[i].is_empty() {
@@ -610,6 +640,7 @@ pub fn expand_macro(
             text: expanded,
             macro_context: Some(format!("{}_{}", macro_def.name, call_index)),
             expansion,
+            origin: Some((body_line.file.clone(), body_line.line)),
         });
     }
 

@@ -360,27 +360,27 @@ impl Assembler {
 
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
                 self.expand_macro_pass1(line, &macro_name, &args)
-                    .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                 i += 1;
                 continue;
             }
 
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             if tokens.is_empty() {
                 i += 1;
                 continue;
             }
 
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             if parsed.len() == 1 {
                 if let Some(control) = Self::control_directive(&parsed[0]) {
                     match control {
                         ControlDirective::If(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::If)?;
                             if self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(&line.file, line.line_num))? != 0 {
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))? != 0 {
                                 self.process_lines_pass1(&lines[i + 1..end])?;
                             }
                             i = end + 1;
@@ -389,16 +389,16 @@ impl Assembler {
                         ControlDirective::Loop(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
                             let count = self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                             if count < 0 {
                                 return Err(AsmError::new("Loop count must be non-negative")
-                                    .ensure_location(&line.file, line.line_num));
+                                    .ensure_location(line.diag_file(), line.diag_line()));
                             }
                             if count as usize > MAX_LOOP_ITERATIONS {
                                 return Err(AsmError::new(format!(
                                     "Loop iteration count exceeded {}",
                                     MAX_LOOP_ITERATIONS
-                                )).ensure_location(&line.file, line.line_num));
+                                )).ensure_location(line.diag_file(), line.diag_line()));
                             }
                             for _ in 0..count as usize {
                                 self.process_lines_pass1(&lines[i + 1..end])?;
@@ -430,32 +430,32 @@ impl Assembler {
                                 lines
                             };
                             self.ensure_pack_laid_out(pack_lines)
-                                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                             i = end + 1;
                             continue;
                         }
                         ControlDirective::EndIf => {
                             return Err(AsmError::new("Unexpected .endif without matching .if")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         ControlDirective::EndLoop => {
                             return Err(AsmError::new("Unexpected .endloop without matching .loop")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         ControlDirective::EndOptional => {
                             return Err(AsmError::new("Unexpected .endopt without matching .opt")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         ControlDirective::EndPack => {
                             return Err(AsmError::new("Unexpected .endpack without matching .pack")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                     }
                 }
             }
 
             self.process_parsed_line_pass1(line, &parsed)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             i += 1;
         }
         Ok(())
@@ -472,10 +472,10 @@ impl Assembler {
             match item {
                 ParsedLine::Empty => {}
                 ParsedLine::Label(name) => {
-                    self.define_label_here(name, &line.file, line.line_num)?;
+                    self.define_label_here(name, line.diag_file(), line.diag_line())?;
                 }
                 ParsedLine::LocalLabel(name) => {
-                    self.define_local_label_here(name, &line.file, line.line_num)?;
+                    self.define_local_label_here(name, line.diag_file(), line.diag_line())?;
                 }
                 ParsedLine::ConstDef { name, is_local, expr } => {
                     if self.output_format == OutputFormat::Obj && !*is_local {
@@ -517,20 +517,20 @@ impl Assembler {
                             }
                             Ok(rv) => match &rv.target {
                                 Some(crate::object::section::RelocTarget::Section(sec)) => {
-                                    self.symbols.define_constant_in_section(name, rv.addend, *sec, &line.file, line.line_num)?;
+                                    self.symbols.define_constant_in_section(name, rv.addend, *sec, line.diag_file(), line.diag_line())?;
                                 }
                                 None => {
-                                    self.symbols.define_constant(name, rv.addend, &line.file, line.line_num)?;
+                                    self.symbols.define_constant(name, rv.addend, line.diag_file(), line.diag_line())?;
                                 }
                                 Some(crate::object::section::RelocTarget::Symbol(_)) => {
                                     // RHS references a symbol not yet defined
                                     // (forward reference / external). Defer and
                                     // retry after pass 1.
-                                    self.symbols.define_constant_deferred(name, expr.clone(), &line.file, line.line_num)?;
+                                    self.symbols.define_constant_deferred(name, expr.clone(), line.diag_file(), line.diag_line())?;
                                 }
                             },
                             Err(_) => {
-                                self.symbols.define_constant_deferred(name, expr.clone(), &line.file, line.line_num)?;
+                                self.symbols.define_constant_deferred(name, expr.clone(), line.diag_file(), line.diag_line())?;
                             }
                         }
                     } else {
@@ -547,17 +547,17 @@ impl Assembler {
                         match eval_expr(expr, &resolver, self.pc) {
                             Ok(val) => {
                                 if *is_local {
-                                    self.symbols.define_local_constant(name, val, &line.file, line.line_num)?;
+                                    self.symbols.define_local_constant(name, val, line.diag_file(), line.diag_line())?;
                                 } else if self.symbols.is_mutable(name) {
                                     self.symbols.update_variable(name, val)?;
                                 } else {
-                                    self.symbols.define_constant(name, val, &line.file, line.line_num)?;
+                                    self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
                                 }
                             }
                             Err(_) => {
                                 // Defer evaluation
                                 if !*is_local {
-                                    self.symbols.define_constant_deferred(name, expr.clone(), &line.file, line.line_num)?;
+                                    self.symbols.define_constant_deferred(name, expr.clone(), line.diag_file(), line.diag_line())?;
                                 }
                             }
                         }
@@ -568,7 +568,7 @@ impl Assembler {
                         self.symbols.resolve(sym)
                     };
                     if let Ok(val) = eval_expr(expr, &resolver, self.pc) {
-                        self.symbols.define_variable(name, val, &line.file, line.line_num)?;
+                        self.symbols.define_variable(name, val, line.diag_file(), line.diag_line())?;
                     }
                 }
                 ParsedLine::Instruction { mnemonic, operands, .. } => {
@@ -576,7 +576,7 @@ impl Assembler {
                     self.advance_pc(size as u16);
                 }
                 ParsedLine::Directive(dir) => {
-                    self.process_directive_pass1(dir, &line.file, line.line_num)?;
+                    self.process_directive_pass1(dir, line.diag_file(), line.diag_line())?;
                 }
             }
         }
@@ -704,7 +704,7 @@ impl Assembler {
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
                 let macro_start_pc = self.pc;
                 self.expand_macro_pass2(line, &macro_name, &args)
-                    .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                 self.listing_data.push(ListingLine {
                     file: line.file.clone(),
                     line_num: line.line_num,
@@ -717,8 +717,8 @@ impl Assembler {
                 continue;
             }
 
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             if tokens.is_empty() {
                 self.listing_data.push(ListingLine {
                     file: line.file.clone(),
@@ -733,7 +733,7 @@ impl Assembler {
             }
 
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             if parsed.len() == 1 {
                 if let Some(control) = Self::control_directive(&parsed[0]) {
                     match control {
@@ -748,7 +748,7 @@ impl Assembler {
                                 macro_expansion: line.macro_context.is_some(),
                             });
                             if self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(&line.file, line.line_num))? != 0 {
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))? != 0 {
                                 self.process_lines_pass2(&lines[i + 1..end])?;
                             }
                             // Record the closing .endif
@@ -767,16 +767,16 @@ impl Assembler {
                         ControlDirective::Loop(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
                             let count = self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                             if count < 0 {
                                 return Err(AsmError::new("Loop count must be non-negative")
-                                    .ensure_location(&line.file, line.line_num));
+                                    .ensure_location(line.diag_file(), line.diag_line()));
                             }
                             if count as usize > MAX_LOOP_ITERATIONS {
                                 return Err(AsmError::new(format!(
                                     "Loop iteration count exceeded {}",
                                     MAX_LOOP_ITERATIONS
-                                )).ensure_location(&line.file, line.line_num));
+                                )).ensure_location(line.diag_file(), line.diag_line()));
                             }
                             self.listing_data.push(ListingLine {
                                 file: line.file.clone(),
@@ -856,7 +856,7 @@ impl Assembler {
                                 lines
                             };
                             self.ensure_pack_laid_out(pack_lines)
-                                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                             // Record the .pack and .endpack lines in the listing.
                             self.listing_data.push(ListingLine {
                                 file: line.file.clone(),
@@ -880,26 +880,26 @@ impl Assembler {
                         }
                         ControlDirective::EndIf => {
                             return Err(AsmError::new("Unexpected .endif without matching .if")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         ControlDirective::EndLoop => {
                             return Err(AsmError::new("Unexpected .endloop without matching .loop")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         ControlDirective::EndOptional => {
                             return Err(AsmError::new("Unexpected .endopt without matching .opt")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         ControlDirective::EndPack => {
                             return Err(AsmError::new("Unexpected .endpack without matching .pack")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                     }
                 }
             }
 
             self.process_parsed_line_pass2(line, &parsed, &tokens)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             let byte_count = self.output.write_count() - wc_before;
             self.listing_data.push(ListingLine {
                 file: line.file.clone(),
@@ -927,10 +927,10 @@ impl Assembler {
             match item {
                 ParsedLine::Empty => {}
                 ParsedLine::Label(name) => {
-                    self.define_label_here(name, &line.file, line.line_num)?;
+                    self.define_label_here(name, line.diag_file(), line.diag_line())?;
                 }
                 ParsedLine::LocalLabel(name) => {
-                    self.define_local_label_here(name, &line.file, line.line_num)?;
+                    self.define_local_label_here(name, line.diag_file(), line.diag_line())?;
                 }
                 ParsedLine::ConstDef { name, is_local, expr } => {
                     if self.output_format == OutputFormat::Obj && !*is_local {
@@ -966,14 +966,14 @@ impl Assembler {
                         let val = rv.addend;
                         match &rv.target {
                             Some(crate::object::section::RelocTarget::Section(sec)) => {
-                                self.symbols.define_constant_in_section(name, val, *sec, &line.file, line.line_num)?;
+                                self.symbols.define_constant_in_section(name, val, *sec, line.diag_file(), line.diag_line())?;
                             }
                             _ => {
                                 // Absolute or undefined — fall back to regular constant
                                 if self.symbols.is_mutable(name) {
                                     self.symbols.update_variable(name, val)?;
                                 } else {
-                                    self.symbols.define_constant(name, val, &line.file, line.line_num)?;
+                                    self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
                                 }
                             }
                         }
@@ -989,14 +989,14 @@ impl Assembler {
                             }, pc)?
                         };
                         if *is_local {
-                            self.symbols.define_local_constant(name, val, &line.file, line.line_num)?;
+                            self.symbols.define_local_constant(name, val, line.diag_file(), line.diag_line())?;
                         } else {
                             if self.symbols.is_mutable(name) {
                                 self.symbols.update_variable(name, val)?;
                             } else if self.symbols.exists(name) {
-                                self.symbols.define_constant(name, val, &line.file, line.line_num)?;
+                                self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
                             } else {
-                                self.symbols.define_constant(name, val, &line.file, line.line_num)?;
+                                self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
                             }
                         }
                     }
@@ -1006,7 +1006,7 @@ impl Assembler {
                     if self.symbols.exists(name) {
                         let _ = self.symbols.update_variable(name, val);
                     } else {
-                        self.symbols.define_variable(name, val, &line.file, line.line_num)?;
+                        self.symbols.define_variable(name, val, line.diag_file(), line.diag_line())?;
                     }
                 }
                 ParsedLine::Instruction { mnemonic, operands, expressions } => {
@@ -1024,7 +1024,7 @@ impl Assembler {
                 ParsedLine::Directive(dir) => {
                     let kind = directive_emission_kind(dir);
                     let (section, offset_or_address) = self.debug_position();
-                    self.process_directive_pass2(dir, &line.file, line.line_num)?;
+                    self.process_directive_pass2(dir, line.diag_file(), line.diag_line())?;
                     if let Some(kind) = kind {
                         self.record_debug_row(
                             line,
@@ -1132,13 +1132,13 @@ impl Assembler {
             if parse_macro_invocation(&line.text, &self.symbols).is_some() {
                 continue;
             }
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             if tokens.is_empty() {
                 continue;
             }
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             if parsed.len() != 1 {
                 continue;
             }
@@ -1259,7 +1259,7 @@ impl Assembler {
             if idx >= block_start && idx < block_end {
                 continue;
             }
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             if tokens.is_empty() {
                 continue;
             }
@@ -1291,7 +1291,7 @@ impl Assembler {
             if parse_macro_invocation(&line.text, &self.symbols).is_some() {
                 continue;
             }
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             if tokens.is_empty() {
                 continue;
             }
@@ -1312,7 +1312,7 @@ impl Assembler {
             if idx >= block_start && idx < block_end {
                 continue;
             }
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             for token in &tokens {
                 if let crate::lexer::Token::Identifier(name) = &token.value {
                     referenced.insert(name.clone());
@@ -1341,7 +1341,7 @@ impl Assembler {
             if parse_macro_invocation(&line.text, &self.symbols).is_some() {
                 return Ok(OptionalBlockClass::Code);
             }
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             if tokens.is_empty() {
                 continue;
             }
@@ -1401,7 +1401,7 @@ impl Assembler {
             if parse_macro_invocation(&line.text, &self.symbols).is_some() {
                 continue;
             }
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             if tokens.is_empty() {
                 continue;
             }
@@ -2041,7 +2041,7 @@ impl Assembler {
         let mut i = 0;
         while i < lines.len() {
             let line = &lines[i];
-            let tokens = match tokenize_line(&line.text, &line.file, line.line_num) {
+            let tokens = match tokenize_line(&line.text, line.diag_file(), line.diag_line()) {
                 Ok(t) => t,
                 Err(_) => { i += 1; continue; }
             };
@@ -2076,11 +2076,11 @@ impl Assembler {
         let mut current_global_label: Option<String> = None;
 
         for line in &lines[start + 1..end] {
-            let tokens = tokenize_line(&line.text, &line.file, line.line_num)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+            let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             if tokens.is_empty() { continue; }
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
             for item in &parsed {
                 match item {
                     ParsedLine::Empty => {}
@@ -2111,27 +2111,27 @@ impl Assembler {
                             .is_some();
                         if !*is_local && !is_resolved_global {
                             if let Ok(value) = self.eval_expr(expr) {
-                                self.symbols.define_constant(name, value, &line.file, line.line_num)?;
+                                self.symbols.define_constant(name, value, line.diag_file(), line.diag_line())?;
                             }
                         }
                     }
                     ParsedLine::Directive(Directive::Storage { length, filler }) => {
                         if filler.is_some() {
                             return Err(AsmError::new(".storage inside .pack must not specify a filler")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         let len = self.eval_expr(length)
-                            .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+                            .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                         if len < 0 {
                             return Err(AsmError::new(".storage length must be non-negative")
-                                .ensure_location(&line.file, line.line_num));
+                                .ensure_location(line.diag_file(), line.diag_line()));
                         }
                         size += len as u32;
                     }
                     _ => {
                         return Err(AsmError::new(
                             "Only labels, constant assignments and .storage are allowed inside a .pack block")
-                            .ensure_location(&line.file, line.line_num));
+                            .ensure_location(line.diag_file(), line.diag_line()));
                     }
                 }
             }

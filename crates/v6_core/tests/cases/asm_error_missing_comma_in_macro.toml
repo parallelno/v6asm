@@ -1,0 +1,19 @@
+# .error/.print arguments must be comma-separated. When a missing comma is hit
+# while expanding a macro, the diagnostic must (a) explain the comma
+# requirement and (b) point at the macro definition line, not the invocation.
+
+[files]
+"main.asm" = '''
+.include "macros.asm"
+HL(1)
+'''
+"macros.asm" = '''
+.macro HL(v)
+.error "bad " v
+.endmacro
+'''
+
+[expect]
+error_contains = "Expected ',' between .error arguments"
+error_file = "macros.asm"
+error_line = 2

@@ -492,11 +492,11 @@ fn parse_directive(name: &str, tokens: &[LocatedToken], pos: &mut usize) -> AsmR
             Ok(Directive::Encoding { enc_type, case })
         }
         "PRINT" => {
-            let args = parse_print_args(tokens, pos)?;
+            let args = parse_print_args("print", tokens, pos)?;
             Ok(Directive::Print(args))
         }
         "ERROR" => {
-            let args = parse_print_args(tokens, pos)?;
+            let args = parse_print_args("error", tokens, pos)?;
             Ok(Directive::Error(args))
         }
         "VAR" => {
@@ -903,7 +903,7 @@ fn parse_text_items(tokens: &[LocatedToken], pos: &mut usize) -> AsmResult<Vec<T
     Ok(items)
 }
 
-fn parse_print_args(tokens: &[LocatedToken], pos: &mut usize) -> AsmResult<Vec<PrintArg>> {
+fn parse_print_args(name: &str, tokens: &[LocatedToken], pos: &mut usize) -> AsmResult<Vec<PrintArg>> {
     let mut args = Vec::new();
     loop {
         if *pos >= tokens.len() { break; }
@@ -921,6 +921,17 @@ fn parse_print_args(tokens: &[LocatedToken], pos: &mut usize) -> AsmResult<Vec<P
         if !eat_comma(tokens, pos) {
             break;
         }
+    }
+    // Arguments must be separated by commas. Catching the leftover token here
+    // (rather than letting the generic "unexpected token after statement" fire)
+    // gives a message that points at the real mistake.
+    if *pos < tokens.len() {
+        let tok = &tokens[*pos];
+        return Err(AsmError::new(format!(
+            "Expected ',' between .{} arguments, but found {:?}. Arguments of .print/.error must be separated by commas.",
+            name, tok.value
+        ))
+        .with_location(tok.loc.clone()));
     }
     Ok(args)
 }

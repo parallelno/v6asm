@@ -34,6 +34,7 @@ struct Expected {
     symbols: HashMap<String, i64>,
     error_contains: Option<String>,
     error_line: Option<usize>,
+    error_file: Option<String>,
     optional_enabled: Option<bool>,
     force_once: Option<bool>,
 }
@@ -186,6 +187,17 @@ fn check_expectations(
                         }
                     } else {
                         writeln!(details, "  Expected error at line {} but error has no location", expected_line).unwrap();
+                        passed = false;
+                    }
+                }
+                if let Some(ref expected_file) = expect.error_file {
+                    if let Some(ref loc) = e.location {
+                        if loc.file != *expected_file {
+                            writeln!(details, "  Error file mismatch: expected {:?}, got {:?}", expected_file, loc.file).unwrap();
+                            passed = false;
+                        }
+                    } else {
+                        writeln!(details, "  Expected error in file {:?} but error has no location", expected_file).unwrap();
                         passed = false;
                     }
                 }

@@ -1,4 +1,4 @@
-use v6_core::symbols::{MacroDef, MacroParam, SymbolTable};
+use v6_core::symbols::{MacroBodyLine, MacroDef, MacroParam, SymbolTable};
 
 #[test]
 fn test_global_label() {
@@ -71,7 +71,11 @@ fn test_macro_lookup_is_case_insensitive() {
             name: "Color".to_string(),
             default: Some("7".to_string()),
         }],
-        body: vec!["nop".to_string()],
+        body: vec![MacroBodyLine {
+            text: "nop".to_string(),
+            file: "test.asm".to_string(),
+            line: 1,
+        }],
         file: "test.asm".to_string(),
         line: 1,
     }).unwrap();

@@ -35,7 +35,19 @@ pub struct SymbolInfo {
 pub struct MacroDef {
     pub name: String,
     pub params: Vec<MacroParam>,
-    pub body: Vec<String>,
+    pub body: Vec<MacroBodyLine>,
+    pub file: String,
+    pub line: usize,
+}
+
+/// A single line of a macro body together with its definition location.
+///
+/// Retaining each body line's original file/line lets diagnostics that fire
+/// while the macro is being expanded point back at the macro definition
+/// instead of the invocation site.
+#[derive(Debug, Clone)]
+pub struct MacroBodyLine {
+    pub text: String,
     pub file: String,
     pub line: usize,
 }
