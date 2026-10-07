@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
+use anstream::eprintln as aeprintln;
 use clap::{CommandFactory, Parser};
 use v6_core::assembler::{Assembler, OutputFormat};
 use v6_core::diagnostics::{AsmError, AsmResult};
@@ -9,6 +10,8 @@ use v6_core::output::{generate_listing, generate_rom, rom_start_address, write_d
 use v6_core::preprocessor;
 use v6_core::project::CpuMode;
 use v6_core::symbols::SymbolTable;
+
+mod style;
 
 /// Embedded source template
 const TEMPLATE_ASM: &str = include_str!("templates/main.asm");
@@ -111,7 +114,10 @@ fn main() {
     }
 
     if cli.source.is_some() {
-        eprintln!("Compilation completed in {}", format_elapsed_time(started_at.elapsed()));
+        aeprintln!(
+            "{}",
+            style::paint(style::success(), format!("Compilation completed in {}", format_elapsed_time(started_at.elapsed())))
+        );
     }
 }
 
@@ -140,27 +146,35 @@ fn format_elapsed_time(elapsed: std::time::Duration) -> String {
 }
 
 fn print_error(e: &AsmError) {
-    eprintln!("error: {}", e.message);
+    // Red severity label; the message itself stays plain for easy selection.
+    aeprintln!("{} {}", style::paint(style::error(), "error:"), e.message);
+
+    // Cyan location line.
     if let Some(ref loc) = e.location {
-        if loc.col > 0 {
-            eprintln!("  --> {}:{}:{}", loc.file, loc.line, loc.col);
+        let where_ = if loc.col > 0 {
+            format!("  --> {}:{}:{}", loc.file, loc.line, loc.col)
         } else {
-            eprintln!("  --> {}:{}", loc.file, loc.line);
-        }
+            format!("  --> {}:{}", loc.file, loc.line)
+        };
+        aeprintln!("{}", style::paint(style::location(), where_));
     }
+
+    // Source excerpt with a red caret pointing at the offending column.
     if let Some(ref src) = e.source_line {
-        eprintln!("   |");
-        eprintln!("   | {}", src);
+        aeprintln!("   |");
+        aeprintln!("   | {}", src);
         if let Some(ref loc) = e.location {
             if loc.col > 0 {
-                eprintln!("   | {}^", " ".repeat(loc.col - 1));
+                aeprintln!("   | {}{}", " ".repeat(loc.col - 1), style::paint(style::error(), "^"));
             }
         }
     }
+
+    // Cyan context notes (e.g. macro invocation chains).
     for note in &e.notes {
-        eprintln!("   = note: {}", note);
+        aeprintln!("{} {}", style::paint(style::note(), "= note:"), note);
     }
-    eprintln!();
+    aeprintln!();
 }
 
 // ---- Init command ----
@@ -285,7 +299,7 @@ fn cmd_init(name: &str) -> Result<(), AsmError> {
     std::fs::write(&asm_file, TEMPLATE_ASM)
         .map_err(|e| AsmError::new(format!("Cannot write {}: {}", asm_file, e)))?;
 
-    eprintln!("Created source: {}", asm_file);
+    aeprintln!("{}", style::paint(style::success(), format!("Created source: {}", asm_file)));
     Ok(())
 }
 
@@ -374,7 +388,7 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
 
     if output_format == OutputFormat::Obj {
         if cli.rom_align > 1 {
-            eprintln!("warning: --rom-align is ignored in object mode");
+            aeprintln!("{} --rom-align is ignored in object mode", style::paint(style::warning(), "warning:"));
         }
         let obj_path = cli.output.clone().unwrap_or_else(|| {
             source_path.with_extension("o")
@@ -387,11 +401,14 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
         }
         write_object(&asm, &ObjConfig { debug: cli.debug }, &obj_path)?;
         let total: usize = asm.obj.sections.iter().map(|s| s.size as usize).sum();
-        eprintln!(
-            "OBJ: {} sections, {} bytes, written to {}",
-            asm.obj.sections.len(),
-            total,
-            obj_path.display()
+        aeprintln!(
+            "{}",
+            style::paint(style::success(), format!(
+                "OBJ: {} sections, {} bytes, written to {}",
+                asm.obj.sections.len(),
+                total,
+                obj_path.display()
+            ))
         );
 
         if cli.lst {
@@ -399,7 +416,7 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
             let listing = generate_listing(&asm);
             write_listing(&listing, &lst_path)?;
             if cli.verbose {
-                eprintln!("Listing written to {}", lst_path.display());
+                aeprintln!("{}", style::paint(style::dim(), format!("Listing written to {}", lst_path.display())));
             }
         }
         return Ok(());
@@ -429,16 +446,19 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
         let debug_elf_path = cli.debug_elf.clone().unwrap_or_else(|| rom_path.with_extension("elf"));
         write_debug_companion(&asm, &rom_config, &debug_elf_path)?;
         if cli.verbose {
-            eprintln!("Debug ELF written to {}", debug_elf_path.display());
+            aeprintln!("{}", style::paint(style::dim(), format!("Debug ELF written to {}", debug_elf_path.display())));
         }
     }
 
     let start = rom_start_address(&asm);
-    eprintln!(
-        "ROM: {} bytes, start: 0x{:04X}, written to {}",
-        rom.len(),
-        start,
-        rom_path.display()
+    aeprintln!(
+        "{}",
+        style::paint(style::success(), format!(
+            "ROM: {} bytes, start: 0x{:04X}, written to {}",
+            rom.len(),
+            start,
+            rom_path.display()
+        ))
     );
 
     // Generate listing file
@@ -447,7 +467,7 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
         let listing = generate_listing(&asm);
         write_listing(&listing, &lst_path)?;
         if cli.verbose {
-            eprintln!("Listing written to {}", lst_path.display());
+            aeprintln!("{}", style::paint(style::dim(), format!("Listing written to {}", lst_path.display())));
         }
     }
 

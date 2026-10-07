@@ -36,6 +36,14 @@ Intel 8080/Z80 assembler, version <version>
 (c) Aleksandr Fedotovskikh <mailforfriend@gmail.com>
 ```
 
+## Console Output
+
+Diagnostics on the console are colorized: errors and carets in red, warnings
+in yellow, source locations and notes in cyan, summaries (`ROM:`/`OBJ:`,
+`Compilation completed`) in green, and verbose details dimmed. When stderr is
+not a terminal (pipes, files, CI) the colors are stripped automatically, and
+the standard `NO_COLOR` variable disables them explicitly.
+
 ## Examples
 
 ```bash

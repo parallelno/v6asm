@@ -8,6 +8,8 @@ v6_core = { path = "../v6_core" }
 clap = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+anstream = { workspace = true }
+anstyle = { workspace = true }
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

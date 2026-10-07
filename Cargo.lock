@@ -558,6 +558,8 @@ dependencies = [
 name = "v6asm"
 version = "0.1.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "chrono",
  "clap",
  "env_logger",
@@ -569,6 +571,8 @@ dependencies = [
 name = "v6fdd"
 version = "0.1.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "clap",
  "env_logger",
  "log",

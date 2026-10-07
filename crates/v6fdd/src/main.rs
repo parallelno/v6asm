@@ -1,6 +1,25 @@
+use anstream::eprintln as aeprintln;
+use anstyle::{AnsiColor, Style};
 use clap::Parser;
 use std::path::PathBuf;
 use v6_core::fdd::filesystem::Filesystem;
+
+/// Red bold — error messages.
+fn err_style() -> Style {
+    AnsiColor::Red.on_default().bold()
+}
+
+/// Green bold — success/informational messages.
+fn ok_style() -> Style {
+    AnsiColor::Green.on_default().bold()
+}
+
+/// Wrap `text` in the ANSI codes of `style`, followed by a reset.
+/// Escape sequences are emitted through `anstream`, which strips them
+/// when the stream is not a terminal.
+fn paint(style: Style, text: impl std::fmt::Display) -> String {
+    format!("{style}{text}{}", style.render_reset())
+}
 
 /// v6fdd — Vector-06c FDD image utility
 #[derive(Parser)]
@@ -25,7 +44,7 @@ fn main() {
 
     let mut fs = if let Some(ref tpl) = cli.template {
         let data = std::fs::read(tpl).unwrap_or_else(|e| {
-            eprintln!("Error reading template file {:?}: {}", tpl, e);
+            aeprintln!("{} reading template file {:?}: {}", paint(err_style(), "Error"), tpl, e);
             std::process::exit(1);
         });
         Filesystem::from_bytes(&data)
@@ -35,7 +54,7 @@ fn main() {
 
     for input_path in &cli.input {
         let data = std::fs::read(input_path).unwrap_or_else(|e| {
-            eprintln!("Error reading input file {:?}: {}", input_path, e);
+            aeprintln!("{} reading input file {:?}: {}", paint(err_style(), "Error"), input_path, e);
             std::process::exit(1);
         });
         let basename = input_path
@@ -45,10 +64,13 @@ fn main() {
 
         match fs.save_file(&basename, &data) {
             Some(free) => {
-                eprintln!("Saved {} ({} bytes), free space: {} bytes", basename, data.len(), free);
+                aeprintln!(
+                    "{}",
+                    paint(ok_style(), format!("Saved {} ({} bytes), free space: {} bytes", basename, data.len(), free))
+                );
             }
             None => {
-                eprintln!("Disk full, cannot save {}", basename);
+                aeprintln!("{}", paint(err_style(), format!("Disk full, cannot save {}", basename)));
                 std::process::exit(1);
             }
         }
@@ -58,16 +80,16 @@ fn main() {
     if let Some(parent) = cli.output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).unwrap_or_else(|e| {
-                eprintln!("Error creating output directory: {}", e);
+                aeprintln!("{} creating output directory: {}", paint(err_style(), "Error"), e);
                 std::process::exit(1);
             });
         }
     }
 
     std::fs::write(&cli.output, &fs.bytes).unwrap_or_else(|e| {
-        eprintln!("Error writing output file {:?}: {}", cli.output, e);
+        aeprintln!("{} writing output file {:?}: {}", paint(err_style(), "Error"), cli.output, e);
         std::process::exit(1);
     });
 
-    eprintln!("FDD image written to {:?}", cli.output);
+    aeprintln!("{}", paint(ok_style(), format!("FDD image written to {:?}", cli.output)));
 }
