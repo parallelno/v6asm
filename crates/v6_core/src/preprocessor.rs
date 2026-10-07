@@ -739,8 +739,20 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// Parse a macro invocation from a line of text. Returns (macro_name, arguments) if found.
-pub fn parse_macro_invocation(line: &str, symbols: &SymbolTable) -> Option<(String, Vec<String>)> {
+/// Result of parsing a potential macro invocation.
+pub enum MacroInvocationResult {
+    /// Line does not look like a macro call at all, or the syntax is malformed.
+    NotAMacroCall,
+    /// Line looks like a macro call (Name(args...)) but the macro is not defined.
+    UndefinedMacro(String),
+    /// A known macro invocation with parsed arguments.
+    KnownMacro(String, Vec<String>),
+}
+
+/// Parse a macro invocation from a line of text.
+/// Returns a `MacroInvocationResult` indicating whether the line is a known
+/// macro call, an undefined-macro call, or not a macro call at all.
+pub fn parse_macro_invocation(line: &str, symbols: &SymbolTable) -> MacroInvocationResult {
     // Strip any inline comment so parentheses inside comments don't get mistaken
     // for the macro argument list closing paren.
     let line = strip_single_line_comment(line);
@@ -762,20 +774,29 @@ pub fn parse_macro_invocation(line: &str, symbols: &SymbolTable) -> Option<(Stri
     }
 
     if name.is_empty() {
-        return None;
+        return MacroInvocationResult::NotAMacroCall;
     }
 
     // Check if this is a known macro
     if symbols.get_macro(&name).is_none() {
-        return None;
+        // Check if this looks like a macro call: name immediately followed by '('
+        // (no whitespace), which is distinct from instructions like 'out (expr)'.
+        let rest: String = chars.collect();
+        if rest.starts_with('(') {
+            return MacroInvocationResult::UndefinedMacro(name);
+        }
+        return MacroInvocationResult::NotAMacroCall;
     }
 
     // Parse arguments
     let rest: String = chars.collect();
     let rest = rest.trim();
     let args = if rest.starts_with('(') {
-        let end = rest.rfind(')')?;
-        parse_macro_args(&rest[1..end])
+        if let Some(end) = rest.rfind(')') {
+            parse_macro_args(&rest[1..end])
+        } else {
+            Vec::new()
+        }
     } else if !rest.is_empty() {
         // Arguments without parens (space-separated isn't standard, but handle comma-separated)
         parse_macro_args(rest)
@@ -783,7 +804,7 @@ pub fn parse_macro_invocation(line: &str, symbols: &SymbolTable) -> Option<(Stri
         Vec::new()
     };
 
-    Some((name, args))
+    MacroInvocationResult::KnownMacro(name, args)
 }
 
 fn skip_label(line: &str) -> &str {

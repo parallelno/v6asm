@@ -8,7 +8,7 @@ use crate::instructions::{encode_instruction, ParsedOperand};
 use crate::lexer::{tokenize_line, LocatedToken, Token};
 use crate::object::section::{Reloc, RelocKind, Section};
 use crate::parser::{self, Directive, ParsedLine, PackKind, PrintArg, TextItem};
-use crate::preprocessor::{SourceLine, OriginalSource, ExpansionKind, expand_macro, parse_macro_invocation};
+use crate::preprocessor::{SourceLine, OriginalSource, ExpansionKind, MacroInvocationResult, expand_macro, parse_macro_invocation};
 use crate::project::CpuMode;
 use crate::symbols::SymbolTable;
 
@@ -358,11 +358,21 @@ impl Assembler {
         while i < lines.len() {
             let line = &lines[i];
 
-            if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
-                self.expand_macro_pass1(line, &macro_name, &args)
-                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
-                i += 1;
-                continue;
+            match parse_macro_invocation(&line.text, &self.symbols) {
+                MacroInvocationResult::KnownMacro(macro_name, args) => {
+                    self.expand_macro_pass1(line, &macro_name, &args)
+                        .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
+                    i += 1;
+                    continue;
+                }
+                MacroInvocationResult::UndefinedMacro(name) => {
+                    return Err(AsmError::new(format!(
+                        "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
+                        name, name
+                    ))
+                    .ensure_location(line.diag_file(), line.diag_line()));
+                }
+                MacroInvocationResult::NotAMacroCall => {}
             }
 
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
@@ -706,20 +716,30 @@ impl Assembler {
             let pc_before = self.pc;
             let wc_before = self.output.write_count();
 
-            if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
-                let macro_start_pc = self.pc;
-                self.expand_macro_pass2(line, &macro_name, &args)
-                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
-                self.listing_data.push(ListingLine {
-                    file: line.file.clone(),
-                    line_num: line.line_num,
-                    text: line.text.clone(),
-                    addr: macro_start_pc,
-                    byte_count: 0,
-                    macro_expansion: line.macro_context.is_some(),
-                });
-                i += 1;
-                continue;
+            match parse_macro_invocation(&line.text, &self.symbols) {
+                MacroInvocationResult::KnownMacro(macro_name, args) => {
+                    let macro_start_pc = self.pc;
+                    self.expand_macro_pass2(line, &macro_name, &args)
+                        .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
+                    self.listing_data.push(ListingLine {
+                        file: line.file.clone(),
+                        line_num: line.line_num,
+                        text: line.text.clone(),
+                        addr: macro_start_pc,
+                        byte_count: 0,
+                        macro_expansion: line.macro_context.is_some(),
+                    });
+                    i += 1;
+                    continue;
+                }
+                MacroInvocationResult::UndefinedMacro(name) => {
+                    return Err(AsmError::new(format!(
+                        "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
+                        name, name
+                    ))
+                    .ensure_location(line.diag_file(), line.diag_line()));
+                }
+                MacroInvocationResult::NotAMacroCall => {}
             }
 
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
@@ -1136,8 +1156,11 @@ impl Assembler {
             // A macro invocation can never be a block directive. Skip it so we
             // don't try to parse `FOO()` as an instruction/expression while
             // scanning for the matching block terminator.
-            if parse_macro_invocation(&line.text, &self.symbols).is_some() {
-                continue;
+            match parse_macro_invocation(&line.text, &self.symbols) {
+                MacroInvocationResult::KnownMacro(_, _) | MacroInvocationResult::UndefinedMacro(_) => {
+                    continue;
+                }
+                MacroInvocationResult::NotAMacroCall => {}
             }
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
                 .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
@@ -1295,8 +1318,11 @@ impl Assembler {
         // Labels defined in the block, in definition order.
         let mut defined_labels = Vec::new();
         for line in &lines[block_start..block_end] {
-            if parse_macro_invocation(&line.text, &self.symbols).is_some() {
-                continue;
+            match parse_macro_invocation(&line.text, &self.symbols) {
+                MacroInvocationResult::KnownMacro(_, _) | MacroInvocationResult::UndefinedMacro(_) => {
+                    continue;
+                }
+                MacroInvocationResult::NotAMacroCall => {}
             }
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             if tokens.is_empty() {
@@ -1345,8 +1371,11 @@ impl Assembler {
         let mut has_storage = false;
         for line in lines {
             // A macro invocation expands to instructions: treat as code.
-            if parse_macro_invocation(&line.text, &self.symbols).is_some() {
-                return Ok(OptionalBlockClass::Code);
+            match parse_macro_invocation(&line.text, &self.symbols) {
+                MacroInvocationResult::KnownMacro(_, _) | MacroInvocationResult::UndefinedMacro(_) => {
+                    return Ok(OptionalBlockClass::Code);
+                }
+                MacroInvocationResult::NotAMacroCall => {}
             }
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             if tokens.is_empty() {
@@ -1405,8 +1434,11 @@ impl Assembler {
         for line in lines {
             // A macro invocation defines no symbols and would fail to parse as
             // an instruction, so skip it.
-            if parse_macro_invocation(&line.text, &self.symbols).is_some() {
-                continue;
+            match parse_macro_invocation(&line.text, &self.symbols) {
+                MacroInvocationResult::KnownMacro(_, _) | MacroInvocationResult::UndefinedMacro(_) => {
+                    continue;
+                }
+                MacroInvocationResult::NotAMacroCall => {}
             }
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())?;
             if tokens.is_empty() {
