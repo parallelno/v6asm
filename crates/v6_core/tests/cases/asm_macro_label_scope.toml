@@ -1,0 +1,27 @@
+# Tests that a macro-scoped global label is addressable by its fully-qualified
+# name `MacroName_<call-index>.Label` from outside the expansion.
+
+[files]
+"main.asm" = '''
+.macro MakeBlock(count)
+BlockStart:
+    .loop count
+        db 0x70
+    .endloop
+BlockEnd:
+.endmacro
+
+.org 0x0300
+MakeBlock(2)
+MakeBlock(1)
+dw MakeBlock_1.BlockStart
+dw MakeBlock_2.BlockStart
+'''
+
+[expect]
+rom = "70 70 70 00 03 02 03"
+min_addr = "0300"
+
+[expect.symbols]
+"MakeBlock_1.BlockStart" = 768
+"MakeBlock_2.BlockStart" = 770

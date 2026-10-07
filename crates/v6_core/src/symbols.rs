@@ -74,9 +74,9 @@ pub struct SymbolTable {
     macro_call_count: usize,
     /// Track local label indices for debug output
     local_label_counter: usize,
-    /// Macro-local symbols: key = "MacroName_<call-idx>.SymbolName"
-    macro_locals: HashMap<String, SymbolInfo>,
-    /// Active macro scope stack
+    /// Active macro-expansion scope stack (innermost last). Each entry is the
+    /// per-invocation namespace prefix `MacroName_<call-index>` under which
+    /// global symbols defined by a macro body are stored.
     macro_scope_stack: Vec<String>,
 }
 
@@ -90,7 +90,6 @@ impl SymbolTable {
             current_global_label: None,
             macro_call_count: 0,
             local_label_counter: 0,
-            macro_locals: HashMap::new(),
             macro_scope_stack: Vec::new(),
         }
     }
@@ -242,9 +241,11 @@ impl SymbolTable {
         Ok(())
     }
 
-    /// Update a mutable variable or constant defined with .var
+    /// Update a mutable variable or constant defined with .var. Inside a macro
+    /// expansion this targets the invocations's own namespace entry.
     pub fn update_variable(&mut self, name: &str, value: i64) -> AsmResult<()> {
-        if let Some(sym) = self.globals.get_mut(&ci(name)) {
+        let key = self.effective_global_key(name);
+        if let Some(sym) = self.globals.get_mut(&key) {
             if sym.is_mutable {
                 sym.value = Some(value);
                 return Ok(());
@@ -324,17 +325,13 @@ impl SymbolTable {
         None
     }
 
-    /// Resolve a global symbol value
+    /// Resolve a global symbol value. Inside a macro expansion the symbols
+    /// defined by the macro body are stored under a per-invocation namespace
+    /// (`MacroName_<call-index>.Name`); the innermost matching namespace wins,
+    /// then a plain global of the same name. A fully-qualified namespaced name
+    /// (`MacroName_<call-index>.Name`) also resolves from anywhere.
     pub fn resolve(&self, name: &str) -> Option<i64> {
-        let upper = ci(name);
-        // Check macro-local scope first
-        for scope_prefix in self.macro_scope_stack.iter().rev() {
-            let macro_key = format!("{}.{}", scope_prefix, upper);
-            if let Some(info) = self.macro_locals.get(&macro_key) {
-                return info.value;
-            }
-        }
-        self.globals.get(&upper).and_then(|s| s.value)
+        self.globals.get(&self.effective_global_key(name)).and_then(|s| s.value)
     }
 
     /// Resolve a local symbol in the current scope
@@ -360,16 +357,10 @@ impl SymbolTable {
         }
     }
 
-    /// Look up full symbol info for a global symbol (including macro-local scope).
+    /// Look up full symbol info for a global symbol (including any active
+    /// macro-expansion namespace).
     pub fn get_global_info(&self, name: &str) -> Option<&SymbolInfo> {
-        let upper = ci(name);
-        for scope_prefix in self.macro_scope_stack.iter().rev() {
-            let macro_key = format!("{}.{}", scope_prefix, upper);
-            if let Some(info) = self.macro_locals.get(&macro_key) {
-                return Some(info);
-            }
-        }
-        self.globals.get(&upper)
+        self.globals.get(&self.effective_global_key(name))
     }
 
     /// Look up full symbol info for a local symbol in the current scope.
@@ -427,22 +418,32 @@ impl SymbolTable {
         self.macro_scope_stack.pop();
     }
 
-    /// Define a symbol in the current macro scope
-    pub fn define_macro_local(&mut self, scope_prefix: &str, name: &str, value: i64, file: &str, line: usize) {
-        let key = format!("{}.{}", scope_prefix, ci(name));
-        self.macro_locals.insert(key, SymbolInfo {
-            value: Some(value),
-            expr: None,
-            file: file.to_string(),
-            line,
-            is_mutable: false,
-            is_local: false,
-            scope_id: 0,
-            local_index: None,
-            section: None,
-            original_name: name.to_string(),
-            is_code_label: false,
-        });
+    /// The name under which a *global* symbol written as `name` is stored.
+    ///
+    /// Inside a macro expansion this is `<MacroName>_<call-index>.<name>` so
+    /// that global labels, constants and variables defined by a macro body do
+    /// not collide across invocations (or with outer globals). Outside a macro
+    /// expansion it is simply `name`.
+    pub fn scoped_global_name(&self, name: &str) -> String {
+        match self.macro_scope_stack.last() {
+            Some(prefix) => format!("{}.{}", prefix, name),
+            None => name.to_string(),
+        }
+    }
+
+    /// The effective key in `globals` for a lookup of `name`: the innermost
+    /// active macro namespace that already defines it, else the plain name.
+    /// A fully-qualified `MacroName_<call-index>.Name` is found by the
+    /// plain-name fallback (`.` cannot occur in a normal identifier).
+    fn effective_global_key(&self, name: &str) -> String {
+        let upper = ci(name);
+        for prefix in self.macro_scope_stack.iter().rev() {
+            let key = format!("{}.{}", prefix, upper);
+            if self.globals.contains_key(&key) {
+                return key;
+            }
+        }
+        upper
     }
 
     /// Get all global symbols for debug output
@@ -460,13 +461,14 @@ impl SymbolTable {
         &self.macros
     }
 
-    /// Check if a symbol exists (either global or local)
+    /// Check if a symbol exists (either a plain global or, inside a macro
+    /// expansion, a namespaced entry).
     pub fn exists(&self, name: &str) -> bool {
-        self.globals.contains_key(&ci(name))
+        self.globals.contains_key(&self.effective_global_key(name))
     }
 
     pub fn is_mutable(&self, name: &str) -> bool {
-        self.globals.get(&ci(name)).map(|info| info.is_mutable).unwrap_or(false)
+        self.globals.get(&self.effective_global_key(name)).map(|info| info.is_mutable).unwrap_or(false)
     }
 
     /// Reset for pass 2 (keep definitions, reset scope tracking)

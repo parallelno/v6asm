@@ -478,6 +478,9 @@ impl Assembler {
                     self.define_local_label_here(name, line.diag_file(), line.diag_line())?;
                 }
                 ParsedLine::ConstDef { name, is_local, expr } => {
+                    // Global symbols defined inside a macro body are namespaced
+                    // per invocation so they cannot collide across expansions.
+                    let def_name = self.symbols.scoped_global_name(name);
                     if self.output_format == OutputFormat::Obj && !*is_local {
                         // Object mode: evaluate the alias relocatably already in
                         // pass 1 so a section-relative RHS (`foo = label + 1`)
@@ -517,20 +520,20 @@ impl Assembler {
                             }
                             Ok(rv) => match &rv.target {
                                 Some(crate::object::section::RelocTarget::Section(sec)) => {
-                                    self.symbols.define_constant_in_section(name, rv.addend, *sec, line.diag_file(), line.diag_line())?;
+                                    self.symbols.define_constant_in_section(&def_name, rv.addend, *sec, line.diag_file(), line.diag_line())?;
                                 }
                                 None => {
-                                    self.symbols.define_constant(name, rv.addend, line.diag_file(), line.diag_line())?;
+                                    self.symbols.define_constant(&def_name, rv.addend, line.diag_file(), line.diag_line())?;
                                 }
                                 Some(crate::object::section::RelocTarget::Symbol(_)) => {
                                     // RHS references a symbol not yet defined
                                     // (forward reference / external). Defer and
                                     // retry after pass 1.
-                                    self.symbols.define_constant_deferred(name, expr.clone(), line.diag_file(), line.diag_line())?;
+                                    self.symbols.define_constant_deferred(&def_name, expr.clone(), line.diag_file(), line.diag_line())?;
                                 }
                             },
                             Err(_) => {
-                                self.symbols.define_constant_deferred(name, expr.clone(), line.diag_file(), line.diag_line())?;
+                                self.symbols.define_constant_deferred(&def_name, expr.clone(), line.diag_file(), line.diag_line())?;
                             }
                         }
                     } else {
@@ -551,13 +554,13 @@ impl Assembler {
                                 } else if self.symbols.is_mutable(name) {
                                     self.symbols.update_variable(name, val)?;
                                 } else {
-                                    self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
+                                    self.symbols.define_constant(&def_name, val, line.diag_file(), line.diag_line())?;
                                 }
                             }
                             Err(_) => {
                                 // Defer evaluation
                                 if !*is_local {
-                                    self.symbols.define_constant_deferred(name, expr.clone(), line.diag_file(), line.diag_line())?;
+                                    self.symbols.define_constant_deferred(&def_name, expr.clone(), line.diag_file(), line.diag_line())?;
                                 }
                             }
                         }
@@ -568,7 +571,8 @@ impl Assembler {
                         self.symbols.resolve(sym)
                     };
                     if let Ok(val) = eval_expr(expr, &resolver, self.pc) {
-                        self.symbols.define_variable(name, val, line.diag_file(), line.diag_line())?;
+                        let def_name = self.symbols.scoped_global_name(name);
+                        self.symbols.define_variable(&def_name, val, line.diag_file(), line.diag_line())?;
                     }
                 }
                 ParsedLine::Instruction { mnemonic, operands, .. } => {
@@ -673,7 +677,8 @@ impl Assembler {
                     .map_err(|e| AsmError::new(format!("Cannot stat {}: {}", path, e)))?
                     .len() as i64;
                 if !name.is_empty() {
-                    self.symbols.define_constant(name, size, file, line_num)?;
+                    let def_name = self.symbols.scoped_global_name(name);
+                    self.symbols.define_constant(&def_name, size, file, line_num)?;
                 }
             }
             Directive::Include(_) => {
@@ -933,6 +938,7 @@ impl Assembler {
                     self.define_local_label_here(name, line.diag_file(), line.diag_line())?;
                 }
                 ParsedLine::ConstDef { name, is_local, expr } => {
+                    let def_name = self.symbols.scoped_global_name(name);
                     if self.output_format == OutputFormat::Obj && !*is_local {
                         // In object mode use the relocatable evaluator so that
                         // section-relative results (e.g. `foo = bar + 1`) are
@@ -966,14 +972,14 @@ impl Assembler {
                         let val = rv.addend;
                         match &rv.target {
                             Some(crate::object::section::RelocTarget::Section(sec)) => {
-                                self.symbols.define_constant_in_section(name, val, *sec, line.diag_file(), line.diag_line())?;
+                                self.symbols.define_constant_in_section(&def_name, val, *sec, line.diag_file(), line.diag_line())?;
                             }
                             _ => {
                                 // Absolute or undefined — fall back to regular constant
                                 if self.symbols.is_mutable(name) {
                                     self.symbols.update_variable(name, val)?;
                                 } else {
-                                    self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
+                                    self.symbols.define_constant(&def_name, val, line.diag_file(), line.diag_line())?;
                                 }
                             }
                         }
@@ -994,9 +1000,9 @@ impl Assembler {
                             if self.symbols.is_mutable(name) {
                                 self.symbols.update_variable(name, val)?;
                             } else if self.symbols.exists(name) {
-                                self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
+                                self.symbols.define_constant(&def_name, val, line.diag_file(), line.diag_line())?;
                             } else {
-                                self.symbols.define_constant(name, val, line.diag_file(), line.diag_line())?;
+                                self.symbols.define_constant(&def_name, val, line.diag_file(), line.diag_line())?;
                             }
                         }
                     }
@@ -1006,7 +1012,8 @@ impl Assembler {
                     if self.symbols.exists(name) {
                         let _ = self.symbols.update_variable(name, val);
                     } else {
-                        self.symbols.define_variable(name, val, line.diag_file(), line.diag_line())?;
+                        let def_name = self.symbols.scoped_global_name(name);
+                        self.symbols.define_variable(&def_name, val, line.diag_file(), line.diag_line())?;
                     }
                 }
                 ParsedLine::Instruction { mnemonic, operands, expressions } => {
@@ -1560,7 +1567,8 @@ impl Assembler {
                     if self.symbols.exists(name) {
                         let _ = self.symbols.update_variable(name, size);
                     } else {
-                        self.symbols.define_constant(name, size, file, line_num)?;
+                        let def_name = self.symbols.scoped_global_name(name);
+                        self.symbols.define_constant(&def_name, size, file, line_num)?;
                     }
                 }
             }
@@ -1811,12 +1819,14 @@ impl Assembler {
     }
 
     /// Define a global label at the current location, recording the active
-    /// section in object mode.
+    /// section in object mode. Inside a macro expansion the label is stored
+    /// under the invocation namespace `MacroName_<call-index>.<name>`.
     fn define_label_here(&mut self, name: &str, file: &str, line: usize) -> AsmResult<()> {
+        let name = self.symbols.scoped_global_name(name);
         match self.output_format {
-            OutputFormat::Rom => self.symbols.define_label(name, self.pc, file, line),
+            OutputFormat::Rom => self.symbols.define_label(&name, self.pc, file, line),
             OutputFormat::Obj => {
-                self.symbols.define_label_in(name, self.pc, Some(self.obj.active), file, line)
+                self.symbols.define_label_in(&name, self.pc, Some(self.obj.active), file, line)
             }
         }
     }

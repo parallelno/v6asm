@@ -1,4 +1,6 @@
-# Tests that constants defined in macro body conflict with outer scope on re-invocation
+# Tests that constants defined in a macro body are scoped per invocation.
+# Each invocation gets its own namespace (`MacroName_<call-index>.C`), so the
+# two calls below do not collide with each other or with the outer `C = 9`.
 
 [files]
 "main.asm" = '''
@@ -14,4 +16,5 @@ EmitConst(5)
 '''
 
 [expect]
-error_contains = "already defined"
+rom = "01 05"
+

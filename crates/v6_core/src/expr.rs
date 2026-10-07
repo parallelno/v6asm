@@ -530,8 +530,24 @@ impl<'a> ExprParser<'a> {
                         Ok(Expr::BoolLiteral(false))
                     }
                     _ => {
-                        let name = name.clone();
+                        let mut name = name.clone();
                         self.advance();
+                        // Macro-scoped globals are addressable by their
+                        // fully-qualified name `MacroName_<call-index>.Symbol`.
+                        // A `.` cannot occur in an ordinary identifier, so
+                        // folding `Identifier . Identifier` into one symbol is
+                        // unambiguous.
+                        if matches!(self.peek(), Some(Token::Dot)) {
+                            self.advance();
+                            match self.peek().cloned() {
+                                Some(Token::Identifier(part)) => {
+                                    self.advance();
+                                    name.push('.');
+                                    name.push_str(&part);
+                                }
+                                _ => return Err(self.error("Expected identifier after '.'")),
+                            }
+                        }
                         Ok(Expr::Symbol(name))
                     }
                 }

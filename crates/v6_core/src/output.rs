@@ -57,6 +57,7 @@ pub fn generate_debug_companion(asm: &Assembler, config: &RomConfig) -> Vec<u8> 
         .filter(|info| {
             (info.is_code_label || is_debug_constant(info))
                 && !info.original_name.starts_with('@')
+                && !is_macro_scoped_name(&info.original_name)
         })
         .collect();
     names.sort_by(|left, right| left.original_name.cmp(&right.original_name));
@@ -159,6 +160,7 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
             .filter(|info| {
                 (info.is_code_label || is_debug_constant(info))
                     && !info.original_name.starts_with('@')
+                    && !is_macro_scoped_name(&info.original_name)
             })
             .map(|info| info.original_name.clone())
             .collect();
@@ -172,7 +174,7 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
     if asm.obj.glob_all {
         let mut all_names: Vec<String> = asm.symbols.all_globals()
             .values()
-            .filter(|info| !info.original_name.starts_with('@'))
+            .filter(|info| !info.original_name.starts_with('@') && !is_macro_scoped_name(&info.original_name))
             .map(|info| info.original_name.clone())
             .collect();
         all_names.sort();
@@ -201,10 +203,18 @@ fn is_debug_constant(info: &crate::symbols::SymbolInfo) -> bool {
     !info.is_code_label && !info.is_mutable && info.section.is_none() && info.value.is_some()
 }
 
+/// A symbol whose name contains `.` is a per-invocation macro-scoped symbol
+/// (`MacroName_<call-index>.Name`). These are assembler-generated and are
+/// intentionally omitted from the debugger-facing named-symbol set because
+/// their source spelling is synthetic; see `docs/debug-metadata.md`.
+fn is_macro_scoped_name(name: &str) -> bool {
+    name.contains('.')
+}
+
 fn debug_constants(asm: &Assembler) -> Vec<DebugConstant> {
     let mut constants: Vec<_> = asm.symbols.all_globals()
         .values()
-        .filter(|info| is_debug_constant(info) && !info.original_name.starts_with('@'))
+        .filter(|info| is_debug_constant(info) && !info.original_name.starts_with('@') && !is_macro_scoped_name(&info.original_name))
         .map(|info| DebugConstant {
             name: info.original_name.clone(),
             file: info.file.clone(),
@@ -260,6 +270,7 @@ fn next_debug_label_offset(asm: &Assembler, section: Option<usize>, offset_or_ad
             info.is_code_label
                 && info.section == section
                 && info.value.is_some_and(|value| value as u32 > offset_or_address)
+                && !is_macro_scoped_name(&info.original_name)
         })
         .filter_map(|info| info.value.map(|value| value as u32))
         .min()
