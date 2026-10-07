@@ -1,0 +1,26 @@
+# An error raised inside a nested macro expansion must report the definition
+# line and the full chain of macro invocations (innermost caller first).
+
+[files]
+"main.asm" = '''
+.include "macros.asm"
+OUTER(5)
+'''
+"macros.asm" = '''
+.macro INNER(x)
+mov a, 1
+.endmacro
+
+.macro OUTER(y)
+INNER(y)
+.endmacro
+'''
+
+[expect]
+error_contains = "Expected register or M"
+error_file = "macros.asm"
+error_line = 2
+error_notes = [
+  "in expansion of macro 'INNER', invoked at macros.asm:6",
+  "in expansion of macro 'OUTER', invoked at main.asm:2",
+]

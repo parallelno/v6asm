@@ -157,6 +157,9 @@ fn print_error(e: &AsmError) {
             }
         }
     }
+    for note in &e.notes {
+        eprintln!("   = note: {}", note);
+    }
     eprintln!();
 }
 

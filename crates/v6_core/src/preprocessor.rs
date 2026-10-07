@@ -629,8 +629,11 @@ pub fn expand_macro(
             name: Some(macro_def.name.clone()),
             definition_file: macro_def.file.clone(),
             definition_line: macro_def.line,
-            invocation_file: call_source.file.clone(),
-            invocation_line: call_source.line_num,
+            // Use the origin location: for a call inside another macro body,
+            // `file`/`line_num` hold the outer invocation, whereas the origin is
+            // the actual line where this macro was invoked.
+            invocation_file: call_source.diag_file().to_string(),
+            invocation_line: call_source.diag_line(),
             iteration: None,
         });
         body_text.push(SourceLine {

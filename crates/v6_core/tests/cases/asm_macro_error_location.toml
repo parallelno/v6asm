@@ -19,3 +19,6 @@ CHK(VALUE)
 error_contains = "value 5 too big"
 error_file = "macros.asm"
 error_line = 3
+error_notes = [
+  "in expansion of macro 'CHK', invoked at main.asm:3",
+]

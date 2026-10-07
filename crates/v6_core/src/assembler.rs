@@ -8,7 +8,7 @@ use crate::instructions::{encode_instruction, ParsedOperand};
 use crate::lexer::{tokenize_line, LocatedToken, Token};
 use crate::object::section::{Reloc, RelocKind, Section};
 use crate::parser::{self, Directive, ParsedLine, PackKind, PrintArg, TextItem};
-use crate::preprocessor::{SourceLine, OriginalSource, expand_macro, parse_macro_invocation};
+use crate::preprocessor::{SourceLine, OriginalSource, ExpansionKind, expand_macro, parse_macro_invocation};
 use crate::project::CpuMode;
 use crate::symbols::SymbolTable;
 
@@ -360,27 +360,27 @@ impl Assembler {
 
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
                 self.expand_macro_pass1(line, &macro_name, &args)
-                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                 i += 1;
                 continue;
             }
 
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if tokens.is_empty() {
                 i += 1;
                 continue;
             }
 
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if parsed.len() == 1 {
                 if let Some(control) = Self::control_directive(&parsed[0]) {
                     match control {
                         ControlDirective::If(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::If)?;
                             if self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))? != 0 {
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))? != 0 {
                                 self.process_lines_pass1(&lines[i + 1..end])?;
                             }
                             i = end + 1;
@@ -389,16 +389,16 @@ impl Assembler {
                         ControlDirective::Loop(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
                             let count = self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                             if count < 0 {
                                 return Err(AsmError::new("Loop count must be non-negative")
-                                    .ensure_location(line.diag_file(), line.diag_line()));
+                                    .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                             }
                             if count as usize > MAX_LOOP_ITERATIONS {
                                 return Err(AsmError::new(format!(
                                     "Loop iteration count exceeded {}",
                                     MAX_LOOP_ITERATIONS
-                                )).ensure_location(line.diag_file(), line.diag_line()));
+                                )).ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                             }
                             for _ in 0..count as usize {
                                 self.process_lines_pass1(&lines[i + 1..end])?;
@@ -430,32 +430,32 @@ impl Assembler {
                                 lines
                             };
                             self.ensure_pack_laid_out(pack_lines)
-                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                             i = end + 1;
                             continue;
                         }
                         ControlDirective::EndIf => {
                             return Err(AsmError::new("Unexpected .endif without matching .if")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         ControlDirective::EndLoop => {
                             return Err(AsmError::new("Unexpected .endloop without matching .loop")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         ControlDirective::EndOptional => {
                             return Err(AsmError::new("Unexpected .endopt without matching .opt")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         ControlDirective::EndPack => {
                             return Err(AsmError::new("Unexpected .endpack without matching .pack")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                     }
                 }
             }
 
             self.process_parsed_line_pass1(line, &parsed)
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             i += 1;
         }
         Ok(())
@@ -704,7 +704,7 @@ impl Assembler {
             if let Some((macro_name, args)) = parse_macro_invocation(&line.text, &self.symbols) {
                 let macro_start_pc = self.pc;
                 self.expand_macro_pass2(line, &macro_name, &args)
-                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                    .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                 self.listing_data.push(ListingLine {
                     file: line.file.clone(),
                     line_num: line.line_num,
@@ -718,7 +718,7 @@ impl Assembler {
             }
 
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if tokens.is_empty() {
                 self.listing_data.push(ListingLine {
                     file: line.file.clone(),
@@ -733,7 +733,7 @@ impl Assembler {
             }
 
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if parsed.len() == 1 {
                 if let Some(control) = Self::control_directive(&parsed[0]) {
                     match control {
@@ -748,7 +748,7 @@ impl Assembler {
                                 macro_expansion: line.macro_context.is_some(),
                             });
                             if self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))? != 0 {
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))? != 0 {
                                 self.process_lines_pass2(&lines[i + 1..end])?;
                             }
                             // Record the closing .endif
@@ -767,16 +767,16 @@ impl Assembler {
                         ControlDirective::Loop(expr) => {
                             let end = self.find_matching_block_end(lines, i, BlockKind::Loop)?;
                             let count = self.eval_expr(expr)
-                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                             if count < 0 {
                                 return Err(AsmError::new("Loop count must be non-negative")
-                                    .ensure_location(line.diag_file(), line.diag_line()));
+                                    .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                             }
                             if count as usize > MAX_LOOP_ITERATIONS {
                                 return Err(AsmError::new(format!(
                                     "Loop iteration count exceeded {}",
                                     MAX_LOOP_ITERATIONS
-                                )).ensure_location(line.diag_file(), line.diag_line()));
+                                )).ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                             }
                             self.listing_data.push(ListingLine {
                                 file: line.file.clone(),
@@ -792,10 +792,10 @@ impl Assembler {
                                     body_line.expansion.push(crate::preprocessor::ExpansionSite {
                                         kind: crate::preprocessor::ExpansionKind::Loop,
                                         name: None,
-                                        definition_file: line.file.clone(),
-                                        definition_line: line.line_num,
-                                        invocation_file: line.file.clone(),
-                                        invocation_line: line.line_num,
+                                        definition_file: line.diag_file().to_string(),
+                                        definition_line: line.diag_line(),
+                                        invocation_file: line.diag_file().to_string(),
+                                        invocation_line: line.diag_line(),
                                         iteration: Some(iteration),
                                     });
                                 }
@@ -856,7 +856,7 @@ impl Assembler {
                                 lines
                             };
                             self.ensure_pack_laid_out(pack_lines)
-                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                             // Record the .pack and .endpack lines in the listing.
                             self.listing_data.push(ListingLine {
                                 file: line.file.clone(),
@@ -880,26 +880,26 @@ impl Assembler {
                         }
                         ControlDirective::EndIf => {
                             return Err(AsmError::new("Unexpected .endif without matching .if")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         ControlDirective::EndLoop => {
                             return Err(AsmError::new("Unexpected .endloop without matching .loop")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         ControlDirective::EndOptional => {
                             return Err(AsmError::new("Unexpected .endopt without matching .opt")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         ControlDirective::EndPack => {
                             return Err(AsmError::new("Unexpected .endpack without matching .pack")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                     }
                 }
             }
 
             self.process_parsed_line_pass2(line, &parsed, &tokens)
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             let byte_count = self.output.write_count() - wc_before;
             self.listing_data.push(ListingLine {
                 file: line.file.clone(),
@@ -1133,12 +1133,12 @@ impl Assembler {
                 continue;
             }
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if tokens.is_empty() {
                 continue;
             }
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if parsed.len() != 1 {
                 continue;
             }
@@ -2077,10 +2077,10 @@ impl Assembler {
 
         for line in &lines[start + 1..end] {
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if tokens.is_empty() { continue; }
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
-                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             for item in &parsed {
                 match item {
                     ParsedLine::Empty => {}
@@ -2118,20 +2118,20 @@ impl Assembler {
                     ParsedLine::Directive(Directive::Storage { length, filler }) => {
                         if filler.is_some() {
                             return Err(AsmError::new(".storage inside .pack must not specify a filler")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         let len = self.eval_expr(length)
-                            .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                            .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                         if len < 0 {
                             return Err(AsmError::new(".storage length must be non-negative")
-                                .ensure_location(line.diag_file(), line.diag_line()));
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         size += len as u32;
                     }
                     _ => {
                         return Err(AsmError::new(
                             "Only labels, constant assignments and .storage are allowed inside a .pack block")
-                            .ensure_location(line.diag_file(), line.diag_line()));
+                            .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                     }
                 }
             }
@@ -2341,6 +2341,24 @@ enum ControlDirective<'a> {
     EndOptional,
     Pack,
     EndPack,
+}
+
+/// Build human-readable notes describing the macro invocation chain that led
+/// to `line`. Ordered innermost caller first, so the first note is the macro
+/// invocation closest to the failing line and the last note is the outermost.
+/// Returns an empty vector for ordinary (non-expanded) lines.
+fn expansion_notes(line: &SourceLine) -> Vec<String> {
+    let mut notes = Vec::new();
+    for site in line.expansion.iter().rev() {
+        if site.kind == ExpansionKind::Macro {
+            let name = site.name.clone().unwrap_or_default();
+            notes.push(format!(
+                "in expansion of macro '{}', invoked at {}:{}",
+                name, site.invocation_file, site.invocation_line
+            ));
+        }
+    }
+    notes
 }
 
 fn instruction_column(tokens: &[LocatedToken], mnemonic: &str) -> u32 {

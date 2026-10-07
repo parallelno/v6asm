@@ -20,6 +20,9 @@ pub struct AsmError {
     pub location: Option<SourceLocation>,
     pub message: String,
     pub source_line: Option<String>,
+    /// Additional context notes, e.g. the chain of macro invocations that led
+    /// to the failing line. Rendered under the main diagnostic.
+    pub notes: Vec<String>,
 }
 
 impl fmt::Display for AsmError {
@@ -40,6 +43,9 @@ impl fmt::Display for AsmError {
                 }
             }
         }
+        for note in &self.notes {
+            write!(f, "\n   = note: {}", note)?;
+        }
         Ok(())
     }
 }
@@ -52,6 +58,7 @@ impl AsmError {
             location: None,
             message: message.into(),
             source_line: None,
+            notes: Vec::new(),
         }
     }
 
@@ -73,6 +80,15 @@ impl AsmError {
                 line,
                 col: 0,
             });
+        }
+        self
+    }
+
+    /// Attach context notes only if none are set yet. Called while unwinding
+    /// through nested expansions, so the innermost (most specific) chain wins.
+    pub fn ensure_notes(mut self, notes: Vec<String>) -> Self {
+        if self.notes.is_empty() {
+            self.notes = notes;
         }
         self
     }

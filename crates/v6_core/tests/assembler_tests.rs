@@ -35,6 +35,8 @@ struct Expected {
     error_contains: Option<String>,
     error_line: Option<usize>,
     error_file: Option<String>,
+    #[serde(default)]
+    error_notes: Vec<String>,
     optional_enabled: Option<bool>,
     force_once: Option<bool>,
 }
@@ -198,6 +200,13 @@ fn check_expectations(
                         }
                     } else {
                         writeln!(details, "  Expected error in file {:?} but error has no location", expected_file).unwrap();
+                        passed = false;
+                    }
+                }
+                for expected_note in &expect.error_notes {
+                    if !e.notes.iter().any(|n| n.contains(expected_note.as_str())) {
+                        writeln!(details, "  Missing error note: expected one containing {:?}", expected_note).unwrap();
+                        writeln!(details, "    Got: {:?}", e.notes).unwrap();
                         passed = false;
                     }
                 }
