@@ -394,6 +394,45 @@ fn undefined_external_becomes_symbol_reloc() {
 }
 
 #[test]
+fn macro_invocation_line_label_is_defined() {
+    // A label may share its line with a macro call. The line is replaced by the
+    // expansion, but the label still defines a symbol where the expansion
+    // starts — it must not leak out as an undefined external.
+    let asm = assemble_obj(
+        ".macro EMIT(v)\n\
+         db v\n\
+         .endmacro\n\
+         @tbl:\n\
+         dw @h05\n\
+         dw @h06\n\
+         @h05:\t\tEMIT(0x11)\n\
+         @h06:\t\tEMIT(0x22)\n",
+    )
+    .unwrap();
+
+    let sec = &asm.obj.sections[0];
+    assert_eq!(sec.name, ".text");
+    // Two words plus the two data bytes emitted by the expansions.
+    assert_eq!(sec.bytes.len(), 6);
+
+    // `dw @h05` (offset 0) and `dw @h06` (offset 2) resolve inside .text.
+    let first = reloc_at(&asm, 0);
+    assert_eq!(first.kind, RelocKind::Abs16);
+    assert_eq!(first.target, RelocTarget::Section(0));
+    assert_eq!(first.addend, 4); // @h05 follows the two 2-byte words
+    let second = reloc_at(&asm, 2);
+    assert_eq!(second.kind, RelocKind::Abs16);
+    assert_eq!(second.target, RelocTarget::Section(0));
+    assert_eq!(second.addend, 5);
+
+    // Nothing references the labels as dropped externals.
+    for reloc in &sec.relocs {
+        assert_ne!(reloc.target, RelocTarget::Symbol("h05".to_string()));
+        assert_ne!(reloc.target, RelocTarget::Symbol("h06".to_string()));
+    }
+}
+
+#[test]
 fn absolute_constant_is_baked_without_reloc() {
     // `= $7331` is a pure constant: emitted directly, no relocation.
     let asm = assemble_obj(

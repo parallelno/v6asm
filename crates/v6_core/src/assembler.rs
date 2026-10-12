@@ -8,7 +8,7 @@ use crate::instructions::{encode_instruction, ParsedOperand};
 use crate::lexer::{tokenize_line, LocatedToken, Token};
 use crate::object::section::{Reloc, RelocKind, Section};
 use crate::parser::{self, Directive, ParsedLine, PackKind, PrintArg, TextItem};
-use crate::preprocessor::{SourceLine, OriginalSource, ExpansionKind, MacroInvocationResult, expand_macro, parse_macro_invocation};
+use crate::preprocessor::{SourceLine, OriginalSource, ExpansionKind, MacroInvocationResult, expand_macro, parse_macro_invocation, split_leading_label};
 use crate::project::CpuMode;
 use crate::symbols::SymbolTable;
 
@@ -360,6 +360,12 @@ impl Assembler {
 
             match parse_macro_invocation(&line.text, &self.symbols) {
                 MacroInvocationResult::KnownMacro(macro_name, args) => {
+                    // A label may share its line with the macro call
+                    // (`@h05: COPY_SPRITE_TO_SCR(5)`). The statement is replaced
+                    // by the expansion, so the label has to be defined here: it
+                    // belongs to the enclosing scope and marks the address where
+                    // the expansion starts.
+                    self.define_leading_label(line)?;
                     self.expand_macro_pass1(line, &macro_name, &args)
                         .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
                     i += 1;
@@ -718,6 +724,9 @@ impl Assembler {
 
             match parse_macro_invocation(&line.text, &self.symbols) {
                 MacroInvocationResult::KnownMacro(macro_name, args) => {
+                    // Define a label sharing the line with the macro call, at
+                    // the start of the expansion (mirrors pass 1).
+                    self.define_leading_label(line)?;
                     let macro_start_pc = self.pc;
                     self.expand_macro_pass2(line, &macro_name, &args)
                         .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
@@ -1318,8 +1327,15 @@ impl Assembler {
         // Labels defined in the block, in definition order.
         let mut defined_labels = Vec::new();
         for line in &lines[block_start..block_end] {
+            // A macro invocation never reaches the parser, but a label sharing
+            // its line still defines a symbol inside the block.
             match parse_macro_invocation(&line.text, &self.symbols) {
                 MacroInvocationResult::KnownMacro(_, _) | MacroInvocationResult::UndefinedMacro(_) => {
+                    if let Some(label) = split_leading_label(line.text.trim_start()) {
+                        if !label.name.is_empty() {
+                            defined_labels.push(label.name.to_string());
+                        }
+                    }
                     continue;
                 }
                 MacroInvocationResult::NotAMacroCall => {}
@@ -1432,10 +1448,15 @@ impl Assembler {
     fn collect_optional_block_symbols(&self, lines: &[SourceLine]) -> AsmResult<Vec<String>> {
         let mut names = Vec::new();
         for line in lines {
-            // A macro invocation defines no symbols and would fail to parse as
-            // an instruction, so skip it.
+            // A macro invocation would fail to parse as an instruction, so skip
+            // it — but a label sharing its line still defines a symbol here.
             match parse_macro_invocation(&line.text, &self.symbols) {
                 MacroInvocationResult::KnownMacro(_, _) | MacroInvocationResult::UndefinedMacro(_) => {
+                    if let Some(label) = split_leading_label(line.text.trim_start()) {
+                        if !label.name.is_empty() {
+                            names.push(label.name.to_string());
+                        }
+                    }
                     continue;
                 }
                 MacroInvocationResult::NotAMacroCall => {}
@@ -1847,6 +1868,25 @@ impl Assembler {
                 }
                 self.pc = self.pc.wrapping_add(len);
             }
+        }
+    }
+
+    /// Define the label that prefixes a statement on the same source line, if
+    /// there is one. Only statement forms handled *before* the parser runs need
+    /// this — currently macro invocations, whose line is replaced wholesale by
+    /// the expansion. Without it the label is silently dropped and every later
+    /// reference to it is emitted as an undefined external symbol.
+    fn define_leading_label(&mut self, line: &SourceLine) -> AsmResult<()> {
+        let Some(label) = split_leading_label(line.text.trim_start()) else {
+            return Ok(());
+        };
+        if label.name.is_empty() {
+            return Ok(());
+        }
+        if label.is_local {
+            self.define_local_label_here(label.name, line.diag_file(), line.diag_line())
+        } else {
+            self.define_label_here(label.name, line.diag_file(), line.diag_line())
         }
     }
 

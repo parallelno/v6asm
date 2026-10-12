@@ -1,6 +1,6 @@
 use v6_core::preprocessor::{
     parse_include_directive, parse_macro_args, parse_macro_params,
-    replace_param, strip_multiline_comments,
+    replace_param, split_leading_label, strip_multiline_comments,
 };
 
 #[test]
@@ -71,4 +71,27 @@ fn test_parse_macro_args_string_with_space() {
 fn test_parse_macro_args() {
     let args = parse_macro_args("$0b, $0f, PalettePtr");
     assert_eq!(args, vec!["$0b", "$0f", "PalettePtr"]);
+}
+
+#[test]
+fn test_split_leading_label() {
+    // Local label sharing the line with a macro invocation.
+    let label = split_leading_label("@h05:\t\tCOPY_SPRITE_TO_SCR(5)").unwrap();
+    assert!(label.is_local);
+    assert_eq!(label.name, "h05");
+    assert_eq!(label.rest, "\t\tCOPY_SPRITE_TO_SCR(5)");
+
+    // Global label, nothing after it.
+    let label = split_leading_label("table:").unwrap();
+    assert!(!label.is_local);
+    assert_eq!(label.name, "table");
+    assert_eq!(label.rest, "");
+
+    // No label prefix at all.
+    assert!(split_leading_label("mvi a, 5").is_none());
+    assert!(split_leading_label("lda score + 1 ; x: y").is_none());
+    // `@name` without a colon is a local *reference*, not a definition.
+    assert!(split_leading_label("@h05").is_none());
+    // A colon later on the line does not turn the line into a label.
+    assert!(split_leading_label("EMIT(1) ; note:").is_none());
 }

@@ -1,0 +1,24 @@
+# Tests that a label sharing its line with a macro invocation is defined in the
+# enclosing scope, at the address where the expansion starts.
+#
+# A macro-invocation line is replaced wholesale by the expansion, so its label
+# prefix has to be defined before expanding. It used to be dropped silently,
+# turning every later `@h05` reference into a link-time undefined symbol.
+
+[files]
+"main.asm" = '''
+.macro EMIT(v)
+    db v
+.endmacro
+
+.org 0x0300
+@tbl:
+    dw @h05
+    dw @h06
+@h05:  EMIT(0x11)
+@h06:  EMIT(0x22)
+'''
+
+[expect]
+rom = "04 03 05 03 11 22"
+min_addr = "0300"

@@ -807,20 +807,51 @@ pub fn parse_macro_invocation(line: &str, symbols: &SymbolTable) -> MacroInvocat
     MacroInvocationResult::KnownMacro(name, args)
 }
 
-fn skip_label(line: &str) -> &str {
-    // Skip a leading label like "name:" or "@name:"
+/// A label definition prefixing a statement on the same source line, e.g.
+/// `name:` or `@name:`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeadingLabel<'a> {
+    /// `true` for `@name:` (a local label), `false` for `name:`.
+    pub is_local: bool,
+    /// The label name, without the `@` prefix and without the `:`.
+    pub name: &'a str,
+    /// Everything that follows the `:`.
+    pub rest: &'a str,
+}
+
+/// Split a leading `name:` / `@name:` label definition off `line`.
+///
+/// Returns `None` when the line does not start with a label. The name may be
+/// empty for a degenerate `:` / `@:` prefix; callers that *define* the label
+/// must ignore those.
+pub fn split_leading_label(line: &str) -> Option<LeadingLabel<'_>> {
     let bytes = line.as_bytes();
     let mut i = 0;
-    if i < bytes.len() && bytes[i] == b'@' {
+    let is_local = i < bytes.len() && bytes[i] == b'@';
+    if is_local {
         i += 1;
     }
+    let name_start = i;
     while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
         i += 1;
     }
     if i < bytes.len() && bytes[i] == b':' {
-        return &line[i + 1..];
+        Some(LeadingLabel {
+            is_local,
+            name: &line[name_start..i],
+            rest: &line[i + 1..],
+        })
+    } else {
+        None
     }
-    line
+}
+
+fn skip_label(line: &str) -> &str {
+    // Skip a leading label like "name:" or "@name:"
+    match split_leading_label(line) {
+        Some(label) => label.rest,
+        None => line,
+    }
 }
 
 pub fn parse_macro_args(s: &str) -> Vec<String> {
