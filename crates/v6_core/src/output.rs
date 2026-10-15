@@ -151,9 +151,27 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
         push_named(name, SymBinding::Weak);
     }
 
+    // `.global *` — export every module-level symbol (excluding `@`-prefixed locals).
+    // This must run before the debug-locals pass below: `push_named` dedupes by
+    // name, so if the debug pass claimed a symbol as Local first, a later
+    // `.global *` export would be silently skipped and cross-object references
+    // to that symbol would fail with undefined-symbol link errors.
+    if asm.obj.glob_all {
+        let mut all_names: Vec<String> = asm.symbols.all_globals()
+            .values()
+            .filter(|info| !info.original_name.starts_with('@') && !is_macro_scoped_name(&info.original_name))
+            .map(|info| info.original_name.clone())
+            .collect();
+        all_names.sort();
+        for name in &all_names {
+            push_named(name, SymBinding::Global);
+        }
+    }
+
     // Preserve module-level labels for debugger lookup. Section symbols remain
     // the relocation targets, so adding these local symbols does not alter the
-    // existing relocation model.
+    // existing relocation model. Symbols already exported above (via `.globl`,
+    // `.weak`, or `.global *`) stay global because of the dedup in push_named.
     if config.debug {
         let mut local_names: Vec<String> = asm.symbols.all_globals()
             .values()
@@ -167,19 +185,6 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
         local_names.sort();
         for name in &local_names {
             push_named(name, SymBinding::Local);
-        }
-    }
-
-    // `.global *` — export every module-level symbol (excluding `@`-prefixed locals).
-    if asm.obj.glob_all {
-        let mut all_names: Vec<String> = asm.symbols.all_globals()
-            .values()
-            .filter(|info| !info.original_name.starts_with('@') && !is_macro_scoped_name(&info.original_name))
-            .map(|info| info.original_name.clone())
-            .collect();
-        all_names.sort();
-        for name in &all_names {
-            push_named(name, SymBinding::Global);
         }
     }
 
