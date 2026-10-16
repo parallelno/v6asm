@@ -195,6 +195,12 @@ PC-relative relocations.
 | `R_V6C_16` | 2 | 2 bytes | 16-bit address operands (`JMP`, `CALL`, `LXI`, `LHLD`, `SHLD`, `LDA`, `STA`, conditional jumps/calls) and `.word` |
 | `R_V6C_LO8` | 3 | 1 byte | `<(sym)` low-byte immediate |
 | `R_V6C_HI8` | 4 | 1 byte | `>(sym)` high-byte immediate |
+| `R_V6C_32` | 5 | 4 bytes | DWARF section-relative references in `.rela.debug_info` (`DW_FORM_strp` → `.debug_str`, `DW_AT_stmt_list` → `.debug_line`, CU `abbrev_offset` → `.debug_abbrev`); not producible from source operands |
+
+`R_V6C_32` mirrors the relocation type the C toolchain already emits in its
+own `.rela.debug_info` sections, and `ld.lld` resolves it identically: a
+section-symbol relocation becomes the input section's offset inside the merged
+(non-allocating) output section plus the addend.
 
 `.dword` remains constant-only; a relocatable `.dword` is an error.
 
@@ -228,7 +234,8 @@ ld.lld interruption.o other.o -T v6c.ld -o program.elf
 ## Scope / non-goals (v1)
 
 - No PC-relative, GOT, PLT, or dynamic linking.
-- No 32-bit relocations (`.dword` stays constant-only).
+- No 32-bit relocations from source operands (`.dword` stays constant-only);
+  the only `R_V6C_32` users are the DWARF metadata relocations described above.
 - No `sym - sym` across sections — only same-section differences fold.
 - Direct-ROM `ET_EXEC` debug companions are available with `-g`; see
   [Debug Metadata](debug-metadata.md) for both direct-ROM and object workflows.

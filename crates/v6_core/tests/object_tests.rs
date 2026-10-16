@@ -1309,3 +1309,191 @@ fn elf_rela_entries_match_section_relocs() {
     offsets.sort();
     assert_eq!(offsets, vec![1, 4]);
 }
+
+// ---- DWARF reference rebasing across a two-object link ----------------------
+//
+// Regression test for the unrebased-DWARF bug: when `ld.lld` concatenates the
+// `.debug_info` / `.debug_str` / `.debug_line` / `.debug_abbrev` sections of
+// several objects, every section-relative reference inside them (strp string
+// offsets, stmt_list, abbrev_offset) must be rebased. v6asm expresses those
+// references as `.rela.debug_info` relocations (R_V6C_32 against the object's
+// debug section symbols); this test replays the linker's rebasing by hand and
+// asserts that the second object's compilation unit reads correctly afterwards
+// — which plain byte-for-byte concatenation would not deliver.
+
+/// A minimal ELF32 view: sections by name plus helpers to locate content.
+struct Elf32 {
+    bytes: Vec<u8>,
+    sections: Vec<(String, usize, usize)>, // name, offset, size
+    symtab: Option<(usize, usize)>,        // offset, size
+}
+
+impl Elf32 {
+    fn parse(bytes: Vec<u8>) -> Self {
+        let read_u32 = |off: usize| {
+            u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize
+        };
+        let e_shoff = read_u32(32);
+        let e_shnum = u16::from_le_bytes(bytes[48..50].try_into().unwrap()) as usize;
+        let e_shstrndx = u16::from_le_bytes(bytes[50..52].try_into().unwrap()) as usize;
+        let sh = |i: usize| e_shoff + i * 40;
+        let shstr_off = read_u32(sh(e_shstrndx) + 16);
+        let name = |i: usize| {
+            let start = shstr_off + read_u32(sh(i));
+            let end = start + bytes[start..].iter().position(|&b| b == 0).unwrap();
+            String::from_utf8_lossy(&bytes[start..end]).into_owned()
+        };
+        let mut sections = Vec::new();
+        let mut symtab = None;
+        for i in 0..e_shnum {
+            let off = read_u32(sh(i) + 16);
+            let size = read_u32(sh(i) + 20);
+            let sname = name(i);
+            if sname == ".symtab" {
+                symtab = Some((off, size));
+            }
+            sections.push((sname, off, size));
+        }
+        Self { bytes, sections, symtab }
+    }
+
+    fn section(&self, name: &str) -> (usize, usize) {
+        self.sections
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|&(_, off, size)| (off, size))
+            .unwrap_or_else(|| panic!("missing section {name}"))
+    }
+
+    fn u32_at(&self, offset: usize) -> u32 {
+        u32::from_le_bytes(self.bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    /// Symtab index of the section symbol of section `name`.
+    fn section_symbol(&self, name: &str) -> u32 {
+        let sec = self
+            .sections
+            .iter()
+            .position(|(n, _, _)| n == name)
+            .expect("section exists") as u16;
+        let (stab_off, stab_size) = self.symtab.expect("symtab exists");
+        for i in 0..stab_size / 16 {
+            let shndx = u16::from_le_bytes(
+                self.bytes[stab_off + i * 16 + 14..stab_off + i * 16 + 16].try_into().unwrap(),
+            );
+            if shndx == sec {
+                return i as u32;
+            }
+        }
+        panic!("no section symbol for {name}");
+    }
+}
+
+/// The c-string at `offset` inside `data`.
+fn c_str_at(data: &[u8], offset: usize) -> String {
+    assert!(offset < data.len(), "offset {offset:#x} out of range");
+    let end = offset + data[offset..].iter().position(|&b| b == 0).unwrap();
+    String::from_utf8_lossy(&data[offset..end]).into_owned()
+}
+
+struct Rela {
+    offset: u32,
+    sym: u32,
+    rtype: u32,
+    addend: i32,
+}
+
+fn rela_entries(elf: &Elf32) -> Vec<Rela> {
+    let (off, size) = elf.section(".rela.debug_info");
+    (0..size / 12)
+        .map(|i| {
+            let base = off + i * 12;
+            let info = elf.u32_at(base + 4);
+            Rela {
+                offset: elf.u32_at(base),
+                sym: info >> 8,
+                rtype: info & 0xff,
+                addend: i32::from_le_bytes(elf.bytes[base + 8..base + 12].try_into().unwrap()),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn linked_second_cu_dwarf_references_are_rebased_over_colliding_string_tables() {
+    // Two objects assembled in *different* project directories. Object B's
+    // string table starts at small offsets that collide with object A's
+    // strings, so plain concatenation would leave B's CU pointing into A's
+    // table — the bug this test guards against.
+    let asm_a = assemble_obj("entry:\nnop\nhlt\n").unwrap();
+    let asm_b = assemble_obj("other:\nnop\nhlt\n").unwrap();
+
+    let elf_a = Elf32::parse(generate_object(&asm_a, &ObjConfig { debug: true }).unwrap());
+    let elf_b = Elf32::parse(generate_object(&asm_b, &ObjConfig { debug: true }).unwrap());
+
+    let (info_a_off, info_a_size) = elf_a.section(".debug_info");
+    let (str_a_off, str_a_size) = elf_a.section(".debug_str");
+    let (str_b_off, str_b_size) = elf_b.section(".debug_str");
+    let (_abbrev_a_off, abbrev_a_size) = elf_a.section(".debug_abbrev");
+    let line_a_len = elf_a.section(".debug_line").1;
+
+    let str_a = elf_a.bytes[str_a_off..str_a_off + str_a_size].to_vec();
+    let str_b = elf_b.bytes[str_b_off..str_b_off + str_b_size].to_vec();
+    let mut info_b = elf_b.bytes
+        [elf_b.section(".debug_info").0..elf_b.section(".debug_info").0 + elf_b.section(".debug_info").1]
+        .to_vec();
+
+    // B's raw comp_dir strp (CU header 11 + abbrev code 1 + producer 4 +
+    // language 2 + name 4 = offset 22) resolves inside A's table to a string
+    // that is NOT B's comp_dir — i.e. the naive link is broken.
+    let b_comp_dir_raw = u32::from_le_bytes(info_b[22..26].try_into().unwrap());
+    let b_comp_dir = c_str_at(&str_b, b_comp_dir_raw as usize);
+    assert_ne!(c_str_at(&str_a, b_comp_dir_raw as usize), b_comp_dir,
+        "precondition: B's comp_dir offset must collide with A's table");
+
+    // Replay ld.lld: apply B's .rela.debug_info entries over the merged
+    // sections. A section-symbol relocation resolves to the input section's
+    // offset inside the merged (non-alloc) output section plus the addend.
+    let str_sym_b = elf_b.section_symbol(".debug_str");
+    let line_sym_b = elf_b.section_symbol(".debug_line");
+    let abbrev_sym_b = elf_b.section_symbol(".debug_abbrev");
+    let entries = rela_entries(&elf_b);
+    assert!(entries.len() >= 5,
+        "all CU strp fields plus stmt_list and abbrev_offset must carry relocations");
+    for rel in &entries {
+        assert_eq!(rel.rtype, 5, "R_V6C_32");
+        let base: i64 = if rel.sym == str_sym_b {
+            str_a_size as i64
+        } else if rel.sym == line_sym_b {
+            line_a_len as i64
+        } else {
+            assert_eq!(rel.sym, abbrev_sym_b, "unexpected relocation target");
+            abbrev_a_size as i64
+        };
+        let value = (base + rel.addend as i64) as u32;
+        info_b[rel.offset as usize..rel.offset as usize + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    // After rebasing, B's CU comp_dir resolves to B's own comp_dir in the
+    // merged string table — and to something different from A's comp_dir.
+    let merged_str = [str_a, str_b].concat();
+    let patched = u32::from_le_bytes(info_b[22..26].try_into().unwrap()) as usize;
+    assert_eq!(c_str_at(&merged_str, patched), b_comp_dir);
+    assert_ne!(
+        c_str_at(&merged_str, patched),
+        c_str_at(&merged_str, u32::from_le_bytes(elf_a.bytes[info_a_off + 22..info_a_off + 26].try_into().unwrap()) as usize),
+        "CU#2 comp_dir must not resolve into CU#1's comp_dir",
+    );
+
+    // stmt_list points at B's line program inside the merged .debug_line, and
+    // abbrev_offset points past A's abbreviation table.
+    assert_eq!(
+        u32::from_le_bytes(info_b[26..30].try_into().unwrap()),
+        line_a_len as u32
+    );
+    assert_eq!(
+        u32::from_le_bytes(info_b[6..10].try_into().unwrap()),
+        abbrev_a_size as u32
+    );
+    let _ = info_a_size;
+}

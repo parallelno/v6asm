@@ -15,6 +15,7 @@ pub const R_V6C_8: u8 = 1;
 pub const R_V6C_16: u8 = 2;
 pub const R_V6C_LO8: u8 = 3;
 pub const R_V6C_HI8: u8 = 4;
+pub const R_V6C_32: u8 = 5;
 
 /// The kind of fixup a relocation applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,11 @@ pub enum RelocKind {
     Lo8,
     /// High byte of a 16-bit address (`R_V6C_HI8`).
     Hi8,
+    /// 32-bit absolute little-endian value (`R_V6C_32`). Only emitted for
+    /// DWARF section-relative references (e.g. `DW_FORM_strp` string offsets
+    /// and `DW_FORM_sec_offset` line-table offsets); source-level operands are
+    /// 8/16-bit and never produce this kind.
+    Abs32,
 }
 
 impl RelocKind {
@@ -37,6 +43,7 @@ impl RelocKind {
             RelocKind::Abs16 => R_V6C_16,
             RelocKind::Lo8 => R_V6C_LO8,
             RelocKind::Hi8 => R_V6C_HI8,
+            RelocKind::Abs32 => R_V6C_32,
         }
     }
 
@@ -44,6 +51,7 @@ impl RelocKind {
     pub fn width(self) -> usize {
         match self {
             RelocKind::Abs16 => 2,
+            RelocKind::Abs32 => 4,
             _ => 1,
         }
     }
@@ -55,6 +63,11 @@ pub enum RelocTarget {
     /// A reference relative to a section base. The section-relative offset is
     /// folded into the relocation addend (LLVM style).
     Section(usize),
+    /// A reference relative to a producer-supplied metadata section (e.g. a
+    /// DWARF `.debug_str`/`.debug_line`/`.debug_abbrev` reference from
+    /// `.debug_info`). The section-relative offset is folded into the
+    /// relocation addend, mirroring `Section`.
+    ExtraSection(usize),
     /// A reference to a named symbol (typically an undefined external).
     Symbol(String),
 }

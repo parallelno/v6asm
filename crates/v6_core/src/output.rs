@@ -82,10 +82,13 @@ pub fn generate_debug_companion(asm: &Assembler, config: &RomConfig) -> Vec<u8> 
         });
     }
     let constants = debug_constants(asm);
+    // Direct-ROM debug companions hold a single compilation unit whose raw
+    // DWARF section-relative offsets are already final, so no relocations.
     let debug_sections = crate::object::dwarf::debug_sections(
         &asm.debug_rows,
         &constants,
         asm.project_dir(),
+        false,
     );
     elf::serialize_executable(&image, rom_start_address(asm), &symbols, &debug_sections)
 }
@@ -199,7 +202,11 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
 
     let constants = debug_constants(asm);
     let debug_sections = config.debug
-        .then(|| crate::object::dwarf::debug_sections(&asm.debug_rows, &constants, asm.project_dir()))
+        .then(|| {
+            // Object mode: emit relocations so ld.lld rebases the DWARF
+            // section-relative references of each CU when concatenating.
+            crate::object::dwarf::debug_sections(&asm.debug_rows, &constants, asm.project_dir(), true)
+        })
         .unwrap_or_default();
     Ok(elf::serialize_with_extra(sections, &symbols, &debug_sections))
 }

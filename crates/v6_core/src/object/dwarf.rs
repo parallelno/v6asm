@@ -8,6 +8,12 @@ use crate::assembler::DebugLineRow;
 use super::elf::ExtraSection;
 use super::section::{Reloc, RelocKind, RelocTarget, SHT_PROGBITS};
 
+/// Indices of the debug sections within the `Vec` returned by `debug_sections`.
+/// Used as `RelocTarget::ExtraSection` relocation targets.
+const DEBUG_ABBREV: usize = 1;
+const DEBUG_LINE: usize = 2;
+const DEBUG_STR: usize = 3;
+
 /// Source provenance for an immutable absolute assembler constant.
 #[derive(Debug, Clone)]
 pub struct DebugConstant {
@@ -25,10 +31,21 @@ const DW_LNE_END_SEQUENCE: u8 = 1;
 const DW_LNE_SET_ADDRESS: u8 = 2;
 
 /// Build the small DWARF v4 subset emitted under `v6asm -g -f obj`.
+///
+/// When `relocate` is true (object mode), every section-relative DWARF
+/// reference inside `.debug_info` — each `DW_FORM_strp` string offset, the
+/// `DW_AT_stmt_list` line-table offset, and the CU header's `abbrev_offset` —
+/// is emitted as a relocation against the corresponding debug section symbol.
+/// `ld.lld` then rebases those references while concatenating the inputs'
+/// debug sections, so each compilation unit's strings, line program, and
+/// abbreviation table stay valid in the merged output. When `relocate` is
+/// false (direct-ROM debug companions), raw single-object offsets are kept and
+/// no relocations are emitted.
 pub fn debug_sections(
     rows: &[DebugLineRow],
     constants: &[DebugConstant],
     compilation_dir: &Path,
+    relocate: bool,
 ) -> Vec<ExtraSection> {
     let mut files: Vec<String> = rows.iter().map(|row| row.file.clone()).collect();
     files.extend(constants.iter().map(|constant| constant.file.clone()));
@@ -56,6 +73,44 @@ pub fn debug_sections(
     let (debug_str, producer_offset, name_offset, comp_dir_offset, constant_name_offsets) =
         debug_strings(&unit_name, &comp_dir, constants);
 
+    let (debug_info_data, strp_fields, stmt_list_field) = debug_info(
+        producer_offset,
+        name_offset,
+        comp_dir_offset,
+        constants,
+        &file_indices,
+        &constant_name_offsets,
+    );
+    // The DWARF references below point into *this object's* debug sections.
+    // In object mode they are rebased by the linker through relocations
+    // against the debug section symbols; in direct-ROM companion mode the
+    // single CU's raw offsets are already final, so no relocations are needed.
+    let mut debug_info_relocs = Vec::new();
+    if relocate {
+        for &(field_offset, string_offset) in &strp_fields {
+            debug_info_relocs.push(Reloc {
+                offset: field_offset,
+                kind: RelocKind::Abs32,
+                target: RelocTarget::ExtraSection(DEBUG_STR),
+                addend: string_offset as i64,
+            });
+        }
+        // DW_AT_stmt_list: offset into this object's .debug_line.
+        debug_info_relocs.push(Reloc {
+            offset: stmt_list_field,
+            kind: RelocKind::Abs32,
+            target: RelocTarget::ExtraSection(DEBUG_LINE),
+            addend: 0,
+        });
+        // CU-header `abbrev_offset` field: right after unit_length + version.
+        debug_info_relocs.push(Reloc {
+            offset: 6,
+            kind: RelocKind::Abs32,
+            target: RelocTarget::ExtraSection(DEBUG_ABBREV),
+            addend: 0,
+        });
+    }
+
     vec![
         ExtraSection {
             name: ".debug_info".to_string(),
@@ -65,15 +120,8 @@ pub fn debug_sections(
             link: 0,
             info: 0,
             entsize: 0,
-            data: debug_info(
-                producer_offset,
-                name_offset,
-                comp_dir_offset,
-                constants,
-                &file_indices,
-                &constant_name_offsets,
-            ),
-            relocs: Vec::new(),
+            data: debug_info_data,
+            relocs: debug_info_relocs,
         },
         ExtraSection {
             name: ".debug_abbrev".to_string(),
@@ -173,19 +221,25 @@ fn debug_info(
     constants: &[DebugConstant],
     file_indices: &BTreeMap<String, u32>,
     constant_name_offsets: &[u32],
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<(u32, u32)>, u32) {
     let mut data = vec![0; 4];
     data.extend_from_slice(&4u16.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
     data.push(2); // V6C address size
     write_uleb(&mut data, 1);
+    let mut strp_fields = Vec::new();
+    strp_fields.push((data.len() as u32, producer_offset));
     data.extend_from_slice(&producer_offset.to_le_bytes());
     data.extend_from_slice(&0x8001u16.to_le_bytes()); // DW_LANG_Mips_Assembler
+    strp_fields.push((data.len() as u32, name_offset));
     data.extend_from_slice(&name_offset.to_le_bytes());
+    strp_fields.push((data.len() as u32, comp_dir_offset));
     data.extend_from_slice(&comp_dir_offset.to_le_bytes());
+    let stmt_list_field = data.len() as u32;
     data.extend_from_slice(&0u32.to_le_bytes()); // .debug_line offset
     for (constant, name_offset) in constants.iter().zip(constant_name_offsets) {
         write_uleb(&mut data, 2);
+        strp_fields.push((data.len() as u32, *name_offset));
         data.extend_from_slice(&name_offset.to_le_bytes());
         write_uleb(&mut data, file_indices[&constant.file] as u64);
         write_uleb(&mut data, constant.line as u64);
@@ -193,7 +247,7 @@ fn debug_info(
     }
     data.push(0); // End of compilation-unit children.
     write_initial_length(&mut data);
-    data
+    (data, strp_fields, stmt_list_field)
 }
 
 fn debug_line(
@@ -347,6 +401,8 @@ mod tests {
     use crate::assembler::{DebugLineRow, EmissionKind};
 
     use super::{debug_sections, write_sleb, write_uleb, DebugConstant, ExtraSection};
+    use super::{DEBUG_ABBREV, DEBUG_LINE, DEBUG_STR};
+    use crate::object::section::{RelocKind, RelocTarget};
 
     fn row(section: Option<usize>, address: u32, file: &str, line: usize, column: u32) -> DebugLineRow {
         DebugLineRow {
@@ -388,9 +444,9 @@ mod tests {
             row(Some(1), 2, "src/main.asm", 9, 6),
             row(Some(0), 1, "lib/util.asm", 4, 0),
         ];
-        let sections = debug_sections(&rows, &[], Path::new("C:\\project"));
+        let sections = debug_sections(&rows, &[], Path::new("C:\\project"), true);
         let reversed_rows: Vec<DebugLineRow> = rows.into_iter().rev().collect();
-        let reversed = debug_sections(&reversed_rows, &[], Path::new("C:\\project"));
+        let reversed = debug_sections(&reversed_rows, &[], Path::new("C:\\project"), true);
 
         assert_eq!(sections.len(), 4);
         assert_eq!(
@@ -427,6 +483,7 @@ mod tests {
             &[row(None, 0x1234, "game.asm", 3, 7)],
             &[],
             Path::new("."),
+            false,
         );
         let line = section(&sections, ".debug_line");
 
@@ -443,7 +500,7 @@ mod tests {
             line: 12,
             value: 0x4000,
         }];
-        let sections = debug_sections(&[], &constants, Path::new("."));
+        let sections = debug_sections(&[], &constants, Path::new("."), true);
 
         assert!(section(&sections, ".debug_str").data.windows(b"ARRAY_ADDR\0".len())
             .any(|window| window == b"ARRAY_ADDR\0"));
@@ -459,5 +516,91 @@ mod tests {
         declaration.extend_from_slice(&[1, 12, 0x80, 0x80, 0x01]);
         let info = &section(&sections, ".debug_info").data;
         assert!(info.windows(declaration.len()).any(|window| window == declaration));
+    }
+
+    /// Read a little-endian u32 at `offset` inside `data`.
+    fn read_u32(data: &[u8], offset: u32) -> u32 {
+        u32::from_le_bytes(data[offset as usize..offset as usize + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn object_mode_debug_info_relocates_every_dwarf_section_reference() {
+        let constants = [
+            DebugConstant {
+                name: "FIRST".to_string(),
+                file: "first.asm".to_string(),
+                line: 1,
+                value: 1,
+            },
+            DebugConstant {
+                name: "SECOND".to_string(),
+                file: "first.asm".to_string(),
+                line: 2,
+                value: 2,
+            },
+        ];
+        let sections = debug_sections(&[], &constants, Path::new("C:/proj"), true);
+        let str_data = &section(&sections, ".debug_str").data;
+        let info = section(&sections, ".debug_info");
+        assert_eq!(info.relocs.len(), 3 /* CU strp */ + 2 /* constant strp */ + 1 /* stmt_list */ + 1 /* abbrev_offset */);
+
+        // Every DW_FORM_strp relocation targets this object's .debug_str with
+        // the string offset folded into the addend, and the baked field bytes
+        // equal the addend (single-object semantics).
+        for reloc in &info.relocs {
+            if let RelocTarget::ExtraSection(target) = &reloc.target {
+                if *target == DEBUG_STR {
+                    assert_eq!(reloc.kind, RelocKind::Abs32);
+                    let field = read_u32(&info.data, reloc.offset);
+                    assert_eq!(field as i64, reloc.addend);
+                    let end = str_data[reloc.addend as usize..]
+                        .iter()
+                        .position(|b| *b == 0)
+                        .unwrap()
+                        + reloc.addend as usize;
+                    assert!(end <= str_data.len());
+                }
+            }
+        }
+
+        // All three CU-header strp fields (producer, name, comp_dir) are
+        // covered: they sit at the three 4-byte fields after the 12-byte CU
+        // header + abbrev code.
+        for expected_offset in [12u32, 18, 22] {
+            assert!(
+                info.relocs.iter().any(|r| r.offset == expected_offset
+                    && r.kind == RelocKind::Abs32
+                    && matches!(&r.target, RelocTarget::ExtraSection(t) if *t == DEBUG_STR)),
+                "missing .debug_str relocation at offset {expected_offset}",
+            );
+        }
+
+        // DW_AT_stmt_list points at this object's .debug_line with addend 0.
+        assert!(info.relocs.iter().any(|r| r.kind == RelocKind::Abs32
+            && matches!(&r.target, RelocTarget::ExtraSection(t) if *t == DEBUG_LINE)
+            && r.addend == 0
+            && read_u32(&info.data, r.offset) == 0));
+
+        // CU-header abbrev_offset (at offset 6) points at .debug_abbrev.
+        assert!(info.relocs.iter().any(|r| r.offset == 6
+            && r.kind == RelocKind::Abs32
+            && matches!(&r.target, RelocTarget::ExtraSection(t) if *t == DEBUG_ABBREV)
+            && r.addend == 0));
+    }
+
+    #[test]
+    fn rom_companion_debug_info_keeps_raw_offsets_without_relocations() {
+        let constants = [DebugConstant {
+            name: "FIRST".to_string(),
+            file: "first.asm".to_string(),
+            line: 1,
+            value: 1,
+        }];
+        let sections = debug_sections(&[], &constants, Path::new("C:/proj"), false);
+        assert!(section(&sections, ".debug_info").relocs.is_empty());
+        // Raw offsets stay baked in (single-CU companions need no rebasing).
+        let info = &section(&sections, ".debug_info").data;
+        assert_eq!(&info[12..16], &0u32.to_le_bytes()); // producer = 0
+        assert_eq!(u32::from_le_bytes(info[6..10].try_into().unwrap()), 0); // abbrev_offset
     }
 }

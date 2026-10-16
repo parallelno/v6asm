@@ -541,7 +541,8 @@ impl Assembler {
                                 None => {
                                     self.symbols.define_constant(&def_name, rv.addend, line.diag_file(), line.diag_line())?;
                                 }
-                                Some(crate::object::section::RelocTarget::Symbol(_)) => {
+                                Some(crate::object::section::RelocTarget::Symbol(_))
+                                | Some(crate::object::section::RelocTarget::ExtraSection(_)) => {
                                     // RHS references a symbol not yet defined
                                     // (forward reference / external). Defer and
                                     // retry after pass 1.
@@ -2047,7 +2048,8 @@ impl Assembler {
                                     c.line_num,
                                 )?;
                             }
-                            Some(crate::object::section::RelocTarget::Symbol(_)) => {
+                            Some(crate::object::section::RelocTarget::Symbol(_))
+                            | Some(crate::object::section::RelocTarget::ExtraSection(_)) => {
                                 self.symbols.define_constant_deferred(
                                     &c.name,
                                     c.expr.clone(),
@@ -2312,7 +2314,8 @@ impl Assembler {
                                 self.symbols.define_constant_in_section(&name, rv.addend, *sec, &file, line)?;
                                 any_resolved = true;
                             }
-                            Some(crate::object::section::RelocTarget::Symbol(_)) => {
+                            Some(crate::object::section::RelocTarget::Symbol(_))
+                            | Some(crate::object::section::RelocTarget::ExtraSection(_)) => {
                                 // Still references an undefined symbol; retry.
                             }
                         }

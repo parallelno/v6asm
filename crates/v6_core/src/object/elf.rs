@@ -233,8 +233,18 @@ pub fn serialize_with_extra(
         write_sym(&mut sym_bytes, 0, 0, 0, info, 0, (1 + i) as u16);
     }
 
+    // Extra (metadata) section symbols, one per producer-supplied section
+    // (e.g. `.debug_str` / `.debug_line` / `.debug_abbrev`), so relocations in
+    // other metadata sections (such as DWARF string offsets in
+    // `.rela.debug_info`) can reference them. Symtab indices continue after
+    // the user section symbols: `1 + n_user + j`.
+    for j in 0..n_extra {
+        let info = (STB_LOCAL << 4) | STT_SECTION;
+        write_sym(&mut sym_bytes, 0, 0, 0, info, 0, (1 + n_user + j) as u16);
+    }
+
     // First global symbol index = after null + section symbols (all local).
-    let first_global = 1 + n_user;
+    let first_global = 1 + n_user + n_extra;
 
     // Partition named symbols: locals first (defined, non-exported), then
     // globals/weaks. We currently only emit globals/weaks and undefined
@@ -248,7 +258,7 @@ pub fn serialize_with_extra(
         }
     }
 
-    let mut next_index = (1 + n_user) as u32;
+    let mut next_index = (1 + n_user + n_extra) as u32;
     // Local named symbols would precede globals; adjust first_global if any.
     let first_global = first_global + local_named.len();
 
@@ -273,6 +283,8 @@ pub fn serialize_with_extra(
             let sym_index = match &r.target {
                 // Section-relative reference uses that section's section symbol.
                 RelocTarget::Section(idx) => (1 + *idx) as u32,
+                // Metadata-section reference uses that extra section's symbol.
+                RelocTarget::ExtraSection(idx) => (1 + n_user + *idx) as u32,
                 RelocTarget::Symbol(name) => *name_to_symidx
                     .get(name)
                     .expect("relocation references an unknown symbol"),

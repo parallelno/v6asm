@@ -48,6 +48,16 @@ input has executable statement rows, and LLD resolves the section-relative
 instruction addresses. In a direct-ROM companion, line addresses are already
 absolute, so `.rela.debug_line` is omitted.
 
+In object mode, `.debug_info` also carries a `.rela.debug_info` section with
+one `R_V6C_32` relocation per section-relative DWARF reference: every
+`DW_FORM_strp` string offset against the object's `.debug_str` section symbol,
+the `DW_AT_stmt_list` line-table offset against `.debug_line`, and the
+CU-header `abbrev_offset` against `.debug_abbrev`. LLD rebases these
+references while concatenating each input object's debug sections, so every
+compilation unit's strings, line program, and abbreviation table stay valid in
+the merged output. In a direct-ROM companion there is a single compilation
+unit whose raw offsets are already final, so `.rela.debug_info` is omitted.
+
 Inspect an object before linking with:
 
 ```powershell

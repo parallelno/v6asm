@@ -172,7 +172,9 @@ impl RelocValue {
         if let Some(target) = &self.target {
             let what = match target {
                 RelocTarget::Symbol(name) => format!("symbol '{}'", name),
-                RelocTarget::Section(_) => "a section-relative address (label)".to_string(),
+                RelocTarget::Section(_) | RelocTarget::ExtraSection(_) => {
+                    "a section-relative address (label)".to_string()
+                }
             };
             return Err(AsmError::new(format!(
                 "expression must be a constant here, but it references {}, whose address is not known until link time",
