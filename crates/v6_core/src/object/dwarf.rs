@@ -498,7 +498,7 @@ fn debug_abbrev() -> Vec<u8> {
     write_uleb(&mut data, 0x0f); // DW_FORM_udata
     data.extend_from_slice(&[0, 0]); // attribute/form terminator
     write_uleb(&mut data, 4); // abbreviation code
-    write_uleb(&mut data, 0x28); // DW_TAG_inlined_subroutine
+    write_uleb(&mut data, 0x1d); // DW_TAG_inlined_subroutine
     data.push(1); // DW_CHILDREN_yes (nested macro invocations)
     write_uleb(&mut data, 0x31); // DW_AT_abstract_origin
     write_uleb(&mut data, 0x13); // DW_FORM_ref4
@@ -1106,6 +1106,21 @@ mod tests {
         let abbrev = &section(&sections, ".debug_abbrev").data;
         let info = &section(&sections, ".debug_info").data;
 
+        // Declaration side: the abbrev table must declare the inline DIE tag as
+        // the spec constant `DW_TAG_inlined_subroutine` (0x1d) — never 0x28,
+        // which is `DW_TAG_enumerator` and would make every inline frame
+        // invisible to conformant DWARF consumers. Attribute, form, and tag
+        // codes below 0x80 are single ULEB bytes, so the pairs appear
+        // literally in `.debug_abbrev`.
+        assert!(
+            abbrev.windows(2).any(|w| w == [0x04, 0x1d]),
+            "abbreviation code 4 must declare DW_TAG_inlined_subroutine (0x1d)"
+        );
+        assert!(
+            !abbrev.windows(2).any(|w| w == [0x04, 0x28]),
+            "abbreviation code 4 must not declare DW_TAG_enumerator (0x28)"
+        );
+
         // Declaration side: the abbrev table must declare `DW_AT_abstract_origin`
         // (0x31) with `DW_FORM_ref4` (0x13) — the DIE stream emits the reference
         // as a 4-byte CU-relative offset — and never as `ref2` (0x12). Attribute
@@ -1125,7 +1140,7 @@ mod tests {
         // exactly what a form/encoding mismatch makes a conformant reader hit.
         let dies = parse_dies(info, abbrev);
         let subprograms: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x2e).collect();
-        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x1d).collect();
         assert_eq!(subprograms.len(), 2, "one abstract subprogram per macro definition");
         assert_eq!(inlines.len(), 2, "one inline DIE per chain level");
 
@@ -1444,7 +1459,7 @@ mod tests {
         assert_eq!(uleb_at(attr(subprograms[0], 0x3a), 0).0, macros_index as u64);
         assert_eq!(uleb_at(attr(subprograms[0], 0x3b), 0).0, 299);
 
-        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x1d).collect();
         assert_eq!(inlines.len(), 1);
         let origin_ref = u32::from_le_bytes(attr(inlines[0], 0x31).try_into().unwrap());
         assert_eq!(origin_ref as usize, subprograms[0].offset);
@@ -1500,7 +1515,7 @@ mod tests {
         definitions.sort();
         assert_eq!(definitions, vec![("INNER".to_string(), 2), ("OUTER".to_string(), 10)]);
 
-        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x1d).collect();
         assert_eq!(inlines.len(), 2);
         let find_abstract = |name: &str| {
             subprograms
@@ -1553,7 +1568,7 @@ mod tests {
         let info = section(&sections, ".debug_info");
         assert!(info.relocs.is_empty());
         let dies = parse_dies(&info.data, &section(&sections, ".debug_abbrev").data);
-        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x1d).collect();
         assert_eq!(inlines.len(), 1);
         assert_eq!(attr(inlines[0], 0x11), &[0x34, 0x12]);
         assert_eq!(attr(inlines[0], 0x12), &[2, 0]);
