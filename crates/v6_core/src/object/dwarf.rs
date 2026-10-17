@@ -501,7 +501,7 @@ fn debug_abbrev() -> Vec<u8> {
     write_uleb(&mut data, 0x28); // DW_TAG_inlined_subroutine
     data.push(1); // DW_CHILDREN_yes (nested macro invocations)
     write_uleb(&mut data, 0x31); // DW_AT_abstract_origin
-    write_uleb(&mut data, 0x12); // DW_FORM_ref4
+    write_uleb(&mut data, 0x13); // DW_FORM_ref4
     write_uleb(&mut data, 0x11); // DW_AT_low_pc
     write_uleb(&mut data, 0x01); // DW_FORM_addr
     write_uleb(&mut data, 0x12); // DW_AT_high_pc
@@ -1015,7 +1015,8 @@ mod tests {
             0x01 => (data[pos..pos + address_size].to_vec(), pos + address_size), // addr
             0x05 => (data[pos..pos + 2].to_vec(), pos + 2),  // data2
             0x0e => (data[pos..pos + 4].to_vec(), pos + 4),  // strp
-            0x12 => (data[pos..pos + 4].to_vec(), pos + 4),  // ref4
+            0x12 => (data[pos..pos + 2].to_vec(), pos + 2),  // ref2
+            0x13 => (data[pos..pos + 4].to_vec(), pos + 4),  // ref4
             0x17 => (data[pos..pos + 4].to_vec(), pos + 4),  // sec_offset
             0x0a => (data[pos..pos + 1].to_vec(), pos + 1),  // data1
             0x0f => {
@@ -1081,6 +1082,69 @@ mod tests {
             dies.push(Die { offset, tag, attrs: values });
         }
         dies
+    }
+
+    #[test]
+    fn macro_inline_die_stream_matches_declared_abbreviation_forms() {
+        // A nested invocation chain exercises two abstract DIEs and a
+        // two-level inline tree in one `.debug_info` contribution.
+        let chain = vec![
+            macro_site("A", "m.asm", 1, "main.asm", 10),
+            macro_site("B", "b.asm", 5, "m.asm", 7),
+        ];
+        let rows = vec![macro_row(
+            None,
+            0x1000,
+            2,
+            "m.asm",
+            2,
+            ("b.asm", 6),
+            "A_1",
+            chain,
+        )];
+        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), false);
+        let abbrev = &section(&sections, ".debug_abbrev").data;
+        let info = &section(&sections, ".debug_info").data;
+
+        // Declaration side: the abbrev table must declare `DW_AT_abstract_origin`
+        // (0x31) with `DW_FORM_ref4` (0x13) — the DIE stream emits the reference
+        // as a 4-byte CU-relative offset — and never as `ref2` (0x12). Attribute
+        // and form codes below 0x80 are single ULEB bytes, so the pairs appear
+        // literally in `.debug_abbrev`.
+        assert!(
+            abbrev.windows(2).any(|w| w == [0x31, 0x13]),
+            "abbrev must declare DW_AT_abstract_origin as DW_FORM_ref4"
+        );
+        assert!(
+            !abbrev.windows(2).any(|w| w == [0x31, 0x12]),
+            "abbrev must not declare DW_AT_abstract_origin as DW_FORM_ref2"
+        );
+
+        // Stream side: walk the DIEs strictly by the declared forms. `parse_dies`
+        // panics on an abbreviation code that is missing from the table, which is
+        // exactly what a form/encoding mismatch makes a conformant reader hit.
+        let dies = parse_dies(info, abbrev);
+        let subprograms: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x2e).collect();
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        assert_eq!(subprograms.len(), 2, "one abstract subprogram per macro definition");
+        assert_eq!(inlines.len(), 2, "one inline DIE per chain level");
+
+        // Each inline level references its abstract DIE with a 4-byte ref4 value
+        // that resolves to that DIE's CU-relative offset.
+        for inline in &inlines {
+            let (_, form, value) = inline
+                .attrs
+                .iter()
+                .find(|(at, _, _)| *at == 0x31)
+                .expect("inline DIE carries DW_AT_abstract_origin");
+            assert_eq!(*form, 0x13, "abstract_origin must use DW_FORM_ref4");
+            assert_eq!(value.len(), 4, "abstract_origin must be encoded in 4 bytes");
+            let target = u32::from_le_bytes(value[..].try_into().unwrap()) as usize;
+            assert!(
+                subprograms.iter().any(|die| die.offset == target),
+                "abstract_origin {target:#x} must resolve to an abstract subprogram DIE"
+            );
+        }
     }
 
     #[test]
