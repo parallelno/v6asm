@@ -38,10 +38,16 @@ Nested macros are supported (up to 32 levels deep), but you cannot open another 
 
 ## Debug Metadata
 
-When assembling with `-g -f obj`, DWARF instruction rows for a macro expansion
-use the macro **invocation** location. This lets a source breakpoint on a macro
-call stop in the generated instructions. The listing remains definition-oriented
-for human inspection; see [Debug Metadata](debug-metadata.md) for the complete
+When assembling with `-g -f obj`, each macro invocation is modeled like a C
+inline function: an abstract `DW_TAG_subprogram` DIE describes the `.macro`
+definition, and a `DW_TAG_inlined_subroutine` DIE covers the instructions the
+expansion emitted, recording where the invocation happened. Macro body
+instructions map to the macro definition lines, and the first instruction of
+an expansion also keeps a statement row at the invocation line, so a source
+breakpoint on a macro call stops in its generated code. Stepping into a macro
+call in a DWARF-aware debugger lands on the macro body, with the invocation
+site shown on the call stack. The listing remains definition-oriented for
+human inspection; see [Debug Metadata](debug-metadata.md) for the complete
 debugger attribution policy.
 
 ## Example with Text Encoding

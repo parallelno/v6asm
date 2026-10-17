@@ -264,6 +264,7 @@ fn debug_rows_keep_macro_definition_and_invocation_provenance() {
     assert_eq!(asm.debug_rows.len(), 1);
     let row = &asm.debug_rows[0];
     assert_eq!(row.line_num, 4);
+    assert_eq!(row.origin, Some(("main.asm".to_string(), 2)));
     assert_eq!(row.expansion.len(), 1);
     assert_eq!(row.expansion[0].name.as_deref(), Some("pause"));
     assert_eq!(row.expansion[0].definition_line, 1);
@@ -1222,6 +1223,112 @@ fn debug_object_contains_dwarf_sections_and_line_relocations() {
         assert_eq!(read_u32(&bytes, sh(index) + 8), 0, "{name} must not be allocatable");
     }
     assert!(asm.debug_rows.iter().all(|row| row.is_stmt));
+}
+
+#[test]
+fn debug_object_emits_macro_inline_dies_and_low_pc_relocations() {
+    let asm = assemble_obj(".macro pause\nnop\nnop\n.endmacro\npause()\nhlt\n").unwrap();
+    assert_eq!(asm.debug_rows.len(), 3);
+    assert!(asm.debug_rows[2].macro_context.is_none());
+    assert!(asm.debug_rows[..2].iter().all(|row| row.macro_context.is_some()));
+    assert_eq!(asm.debug_rows[0].origin, Some(("main.asm".to_string(), 2)));
+    assert_eq!(asm.debug_rows[1].origin, Some(("main.asm".to_string(), 3)));
+
+    let bytes = generate_object(&asm, &ObjConfig { debug: true }).unwrap();
+    let e_shoff = read_u32(&bytes, 32) as usize;
+    let e_shentsize = read_u16(&bytes, 46) as usize;
+    let e_shnum = read_u16(&bytes, 48) as usize;
+    let e_shstrndx = read_u16(&bytes, 50) as usize;
+    let sh = |index: usize| e_shoff + index * e_shentsize;
+    let shstr_off = read_u32(&bytes, sh(e_shstrndx) + 16) as usize;
+    let section_name = |index: usize| {
+        let start = shstr_off + read_u32(&bytes, sh(index)) as usize;
+        let end = start + bytes[start..].iter().position(|&byte| byte == 0).unwrap();
+        String::from_utf8_lossy(&bytes[start..end]).into_owned()
+    };
+
+    let mut info_index = None;
+    let mut rela_info_index = None;
+    let mut str_index = None;
+    for index in 0..e_shnum {
+        match section_name(index).as_str() {
+            ".debug_info" => info_index = Some(index),
+            ".rela.debug_info" => rela_info_index = Some(index),
+            ".debug_str" => str_index = Some(index),
+            _ => {}
+        }
+    }
+    let rela_index = rela_info_index.expect(".rela.debug_info must exist");
+
+    // The inline DIE low_pc fields produce R_V6C_16 relocations against the
+    // .text section symbol (symtab index 1) with the run offset as addend.
+    let rela_off = read_u32(&bytes, sh(rela_index) + 16) as usize;
+    let rela_size = read_u32(&bytes, sh(rela_index) + 20) as usize;
+    let mut abs16_against_text = Vec::new();
+    for entry in 0..rela_size / 12 {
+        let base = rela_off + entry * 12;
+        let r_info = read_u32(&bytes, base + 4);
+        if r_info & 0xff == 2 /* R_V6C_16 */ && r_info >> 8 == 1 {
+            abs16_against_text.push(i32::from_le_bytes(
+                bytes[base + 8..base + 12].try_into().unwrap(),
+            ));
+        }
+    }
+    assert_eq!(abs16_against_text, [0]); // both macro rows form one run at offset 0
+
+    // The macro name lands in .debug_str for the abstract subprogram DIE, and
+    // the .debug_info contribution grew to hold the inline DIEs.
+    let str_off = read_u32(&bytes, sh(str_index.unwrap()) + 16) as usize;
+    assert!(bytes[str_off..].windows(b"pause\0".len()).any(|window| window == b"pause\0"));
+    let info_off = read_u32(&bytes, sh(info_index.unwrap()) + 16) as usize;
+    let info_size = read_u32(&bytes, sh(info_index.unwrap()) + 20) as usize;
+    assert!(info_size > 24, "inline DIEs must extend the compilation unit");
+    assert!(bytes[info_off..info_off + info_size].len() == info_size);
+}
+
+#[test]
+fn debug_object_nested_macro_emits_two_inline_runs() {
+    let asm = assemble_obj(
+        ".macro inner\nnop\n.endmacro\n.macro outer\ninner()\nnop\n.endmacro\nouter()\nhlt\n",
+    )
+    .unwrap();
+
+    let bytes = generate_object(&asm, &ObjConfig { debug: true }).unwrap();
+    let e_shoff = read_u32(&bytes, 32) as usize;
+    let e_shentsize = read_u16(&bytes, 46) as usize;
+    let e_shnum = read_u16(&bytes, 48) as usize;
+    let e_shstrndx = read_u16(&bytes, 50) as usize;
+    let sh = |index: usize| e_shoff + index * e_shentsize;
+    let shstr_off = read_u32(&bytes, sh(e_shstrndx) + 16) as usize;
+    let section_name = |index: usize| {
+        let start = shstr_off + read_u32(&bytes, sh(index)) as usize;
+        let end = start + bytes[start..].iter().position(|&byte| byte == 0).unwrap();
+        String::from_utf8_lossy(&bytes[start..end]).into_owned()
+    };
+
+    let mut rela_index = None;
+    for index in 0..e_shnum {
+        if section_name(index) == ".rela.debug_info" {
+            rela_index = Some(index);
+        }
+    }
+    let rela_index = rela_index.expect(".rela.debug_info must exist");
+
+    // Two contiguous inline runs: INNER's body at offset 0 (nested inside
+    // OUTER) and OUTER's own body at offset 1.
+    let rela_off = read_u32(&bytes, sh(rela_index) + 16) as usize;
+    let rela_size = read_u32(&bytes, sh(rela_index) + 20) as usize;
+    let mut abs16_against_text = Vec::new();
+    for entry in 0..rela_size / 12 {
+        let base = rela_off + entry * 12;
+        let r_info = read_u32(&bytes, base + 4);
+        if r_info & 0xff == 2 /* R_V6C_16 */ && r_info >> 8 == 1 {
+            abs16_against_text.push(i32::from_le_bytes(
+                bytes[base + 8..base + 12].try_into().unwrap(),
+            ));
+        }
+    }
+    assert_eq!(abs16_against_text, [0, 0, 1]);
 }
 
 #[test]

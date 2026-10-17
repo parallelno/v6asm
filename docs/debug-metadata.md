@@ -37,7 +37,7 @@ sections:
 
 | Section | Contents |
 |---------|----------|
-| `.debug_info` | One minimal compilation-unit DIE |
+| `.debug_info` | One minimal compilation-unit DIE with constant declarations, abstract `DW_TAG_subprogram` DIEs for invoked macro definitions, and nested `DW_TAG_inlined_subroutine` DIEs for each macro expansion site |
 | `.debug_abbrev` | Abbreviations used by that compilation unit |
 | `.debug_line` | Instruction source locations plus deterministic directory/file tables |
 | `.debug_str` | Compilation-unit strings |
@@ -51,8 +51,9 @@ absolute, so `.rela.debug_line` is omitted.
 In object mode, `.debug_info` also carries a `.rela.debug_info` section with
 one `R_V6C_32` relocation per section-relative DWARF reference: every
 `DW_FORM_strp` string offset against the object's `.debug_str` section symbol,
-the `DW_AT_stmt_list` line-table offset against `.debug_line`, and the
-CU-header `abbrev_offset` against `.debug_abbrev`. LLD rebases these
+the `DW_AT_stmt_list` line-table offset against `.debug_line`, the CU-header
+`abbrev_offset` against `.debug_abbrev`, and one `R_V6C_16` relocation per
+macro inline DIE's `DW_AT_low_pc` against its code section. LLD rebases these
 references while concatenating each input object's debug sections, so every
 compilation unit's strings, line program, and abbreviation table stay valid in
 the merged output. In a direct-ROM companion there is a single compilation
@@ -81,9 +82,19 @@ gaps are not breakpoint targets.
 - A loop body creates one instruction row per emitted iteration. These rows
   can share a source line while having different linked addresses. The internal
   row model retains the iteration number as expansion provenance.
-- A macro-expanded instruction maps to the macro invocation line. This makes a
-  breakpoint on the invocation stop in its generated code rather than on the
-  macro definition.
+- A macro-expanded instruction maps to the macro body line it was expanded
+  from, and the first instruction of an expansion also keeps a statement row
+  at the invocation line. A breakpoint on the macro call still stops in its
+  generated code, while stepping inside the expansion shows the macro
+  definition.
+- `.debug_info` models macro provenance the way C compilers model inlining:
+  every invoked macro definition gets an abstract `DW_TAG_subprogram` DIE
+  (named after the macro, declared at its `.macro` line), and every contiguous
+  expansion run gets a `DW_TAG_inlined_subroutine` DIE covering the expanded
+  instructions with `DW_AT_call_file`/`DW_AT_call_line` pointing at the
+  invocation site. Nested macro invocations produce nested inline DIEs, so
+  debuggers can step into macro bodies and show the macro invocation chain on
+  the call stack.
 - Multiple instructions separated by `\` on one physical source line produce
   separate rows at their respective instruction starts and physical columns.
 

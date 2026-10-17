@@ -1,9 +1,10 @@
 //! Minimal DWARF v4 metadata for relocatable V6C objects and direct-ROM companions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::assembler::DebugLineRow;
+use crate::preprocessor::{ExpansionKind, ExpansionSite};
 
 use super::elf::ExtraSection;
 use super::section::{Reloc, RelocKind, RelocTarget, SHT_PROGBITS};
@@ -23,6 +24,163 @@ pub struct DebugConstant {
     pub value: i64,
 }
 
+/// A `DebugLineRow` with its line-table attribution resolved.
+#[derive(Debug, Clone)]
+struct AttributedRow {
+    section: Option<usize>,
+    offset_or_address: u32,
+    file: String,
+    line_num: usize,
+    column: u32,
+    is_stmt: bool,
+}
+
+/// One contiguous run of rows emitted by the same macro expansion, used as the
+/// address range of a `DW_TAG_inlined_subroutine` DIE.
+#[derive(Debug, Clone)]
+struct InlineGroup {
+    section: Option<usize>,
+    start: u32,
+    end: u32,
+    /// Expansion chain (definition and invocation site per level) shared by
+    /// every row of the run.
+    chain: Vec<ExpansionSite>,
+}
+
+impl InlineGroup {
+    fn byte_span(&self) -> u16 {
+        (self.end - self.start).min(u16::MAX as u32) as u16
+    }
+}
+
+/// An abstract `DW_TAG_subprogram` DIE for a macro definition.
+#[derive(Debug, Clone)]
+struct AbstractMacro {
+    name_offset: u32,
+    file_index: u32,
+    line: usize,
+}
+
+/// A concrete inline instance ready for DIE emission.
+#[derive(Debug, Clone)]
+struct InlineGroupInfo {
+    section: Option<usize>,
+    start: u32,
+    byte_span: u16,
+    /// One entry per macro level of the expansion chain, outermost first.
+    sites: Vec<SiteRef>,
+}
+
+/// A single nesting level of an inline instance.
+#[derive(Debug, Clone)]
+struct SiteRef {
+    /// Index into the abstract macro DIE list.
+    macro_index: usize,
+    invocation_file: u32,
+    invocation_line: usize,
+}
+
+/// The invocation site of the innermost macro level of an expansion chain.
+fn macro_invocation_site(chain: &[ExpansionSite]) -> Option<(String, usize)> {
+    chain
+        .iter()
+        .rev()
+        .find(|site| site.kind == ExpansionKind::Macro)
+        .map(|site| (site.invocation_file.clone(), site.invocation_line))
+}
+
+/// Re-attribute macro-expanded rows to their macro body lines and collect the
+/// contiguous expansion runs used for the inline DIEs.
+///
+/// Attribution policy (the "Option A" contract between the line table and the
+/// `.debug_info` DIEs):
+///
+/// - Every row of a macro expansion maps to the macro body line it was
+///   expanded from (`origin`), so stepping inside an inline frame shows the
+///   macro definition.
+/// - The first row of an expansion additionally keeps a statement row at the
+///   invocation site, so a breakpoint on the macro call line still resolves.
+///   For a nested call that site is the parent macro's body line, which is
+///   exactly the invocation location recorded in the expansion chain.
+///
+/// Rows are grouped in emission order: a run continues while rows share the
+/// expansion chain, the section, and contiguous addresses. Loop iterations
+/// append their own expansion site, so each unrolled iteration becomes its own
+/// inline instance.
+fn attribute_rows(rows: &[DebugLineRow]) -> (Vec<AttributedRow>, Vec<InlineGroup>) {
+    let mut attributed: Vec<AttributedRow> = Vec::new();
+    let mut groups: Vec<InlineGroup> = Vec::new();
+    let mut entered: HashSet<String> = HashSet::new();
+    let mut open_group: Option<usize> = None;
+
+    for row in rows {
+        if let Some(context) = &row.macro_context {
+            let chain = &row.expansion;
+            if chain.iter().any(|site| site.kind == ExpansionKind::Macro) {
+                let _group_index = match open_group {
+                    Some(index)
+                        if groups[index].chain == *chain
+                            && groups[index].section == row.section
+                            && groups[index].end == row.offset_or_address =>
+                    {
+                        groups[index].end = row.offset_or_address + row.byte_len;
+                        index
+                    }
+                    _ => {
+                        groups.push(InlineGroup {
+                            section: row.section,
+                            start: row.offset_or_address,
+                            end: row.offset_or_address + row.byte_len,
+                            chain: chain.clone(),
+                        });
+                        open_group = Some(groups.len() - 1);
+                        groups.len() - 1
+                    }
+                };
+                let (origin_file, origin_line) = row
+                    .origin
+                    .clone()
+                    .unwrap_or_else(|| (row.file.clone(), row.line_num));
+                if entered.insert(context.clone()) {
+                    // Entry row: keep a statement row at the invocation site so
+                    // a breakpoint on the call line resolves to this code.
+                    let (invocation_file, invocation_line) =
+                        macro_invocation_site(chain)
+                            .unwrap_or_else(|| (row.file.clone(), row.line_num));
+                    attributed.push(AttributedRow {
+                        section: row.section,
+                        offset_or_address: row.offset_or_address,
+                        file: invocation_file,
+                        line_num: invocation_line,
+                        column: row.column,
+                        is_stmt: row.is_stmt,
+                    });
+                }
+                attributed.push(AttributedRow {
+                    section: row.section,
+                    offset_or_address: row.offset_or_address,
+                    file: origin_file,
+                    line_num: origin_line,
+                    column: row.column,
+                    is_stmt: row.is_stmt,
+                });
+                continue;
+            }
+        }
+        open_group = None;
+        attributed.push(AttributedRow {
+            section: row.section,
+            offset_or_address: row.offset_or_address,
+            file: row.file.clone(),
+            line_num: row.line_num,
+            column: row.column,
+            is_stmt: row.is_stmt,
+        });
+    }
+
+    (attributed, groups)
+}
+
 const DW_LNS_COPY: u8 = 1;
 const DW_LNS_ADVANCE_LINE: u8 = 3;
 const DW_LNS_SET_FILE: u8 = 4;
@@ -34,21 +192,44 @@ const DW_LNE_SET_ADDRESS: u8 = 2;
 ///
 /// When `relocate` is true (object mode), every section-relative DWARF
 /// reference inside `.debug_info` — each `DW_FORM_strp` string offset, the
-/// `DW_AT_stmt_list` line-table offset, and the CU header's `abbrev_offset` —
-/// is emitted as a relocation against the corresponding debug section symbol.
-/// `ld.lld` then rebases those references while concatenating the inputs'
-/// debug sections, so each compilation unit's strings, line program, and
-/// abbreviation table stay valid in the merged output. When `relocate` is
-/// false (direct-ROM debug companions), raw single-object offsets are kept and
+/// `DW_AT_stmt_list` line-table offset, the CU header's `abbrev_offset`, and
+/// each inline DIE's `DW_AT_low_pc` — is emitted as a relocation against the
+/// corresponding debug section symbol or code section. `ld.lld` then rebases
+/// those references while concatenating the inputs' debug sections, so each
+/// compilation unit's strings, line program, and abbreviation table stay valid
+/// in the merged output. When `relocate` is false (direct-ROM debug
+/// companions), raw single-object offsets and absolute addresses are kept and
 /// no relocations are emitted.
+///
+/// Macro provenance: rows expanded from a macro body are modeled the way C
+/// compilers model inlining. Each invoked macro definition gets an abstract
+/// `DW_TAG_subprogram` DIE and each contiguous expansion run gets a nested
+/// `DW_TAG_inlined_subroutine` DIE tree with `DW_AT_call_file`/`call_line`,
+/// while the line table maps the expanded instructions to the macro body
+/// lines (keeping an invocation-site entry row per expansion).
 pub fn debug_sections(
     rows: &[DebugLineRow],
     constants: &[DebugConstant],
     compilation_dir: &Path,
     relocate: bool,
 ) -> Vec<ExtraSection> {
-    let mut files: Vec<String> = rows.iter().map(|row| row.file.clone()).collect();
+    let (attributed_rows, groups) = attribute_rows(rows);
+
+    let mut files: Vec<String> = attributed_rows
+        .iter()
+        .map(|row| row.file.clone())
+        .collect();
     files.extend(constants.iter().map(|constant| constant.file.clone()));
+    for group in &groups {
+        for site in group
+            .chain
+            .iter()
+            .filter(|site| site.kind == ExpansionKind::Macro && site.name.is_some())
+        {
+            files.push(site.definition_file.clone());
+            files.push(site.invocation_file.clone());
+        }
+    }
     files.sort();
     files.dedup();
     let mut directories: Vec<String> = files
@@ -70,16 +251,80 @@ pub fn debug_sections(
 
     let unit_name = files.first().cloned().unwrap_or_default();
     let comp_dir = compilation_dir.to_string_lossy().replace('\\', "/");
-    let (debug_str, producer_offset, name_offset, comp_dir_offset, constant_name_offsets) =
-        debug_strings(&unit_name, &comp_dir, constants);
 
-    let (debug_info_data, strp_fields, stmt_list_field) = debug_info(
-        producer_offset,
-        name_offset,
-        comp_dir_offset,
+    // Abstract `DW_TAG_subprogram` DIEs: one per macro definition that was
+    // actually expanded, keyed by (name, definition file, definition line) so
+    // same-named macros in different files stay distinct. The sorted map keeps
+    // the DIE order deterministic.
+    let mut macro_defs: BTreeMap<(String, String, usize), ()> = BTreeMap::new();
+    for group in &groups {
+        for site in group
+            .chain
+            .iter()
+            .filter(|site| site.kind == ExpansionKind::Macro && site.name.is_some())
+        {
+            macro_defs.insert((
+                site.name.clone().unwrap(),
+                site.definition_file.clone(),
+                site.definition_line,
+            ), ());
+        }
+    }
+    let macro_list: Vec<(String, String, usize)> = macro_defs.into_keys().collect();
+    let macro_indices: BTreeMap<(String, String, usize), usize> = macro_list
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key.clone(), index))
+        .collect();
+
+    let (debug_str, producer_offset, name_offset, comp_dir_offset, constant_name_offsets, macro_name_offsets) =
+        debug_strings(&unit_name, &comp_dir, constants, &macro_list);
+    let abstract_macros: Vec<AbstractMacro> = macro_list
+        .iter()
+        .zip(&macro_name_offsets)
+        .map(|((_, file, line), name_offset)| AbstractMacro {
+            name_offset: *name_offset,
+            file_index: file_indices[file],
+            line: *line,
+        })
+        .collect();
+
+    // Concrete inline instances: per contiguous run, one nested
+    // `DW_TAG_inlined_subroutine` DIE per macro level of the expansion chain.
+    let inline_groups: Vec<InlineGroupInfo> = groups
+        .iter()
+        .map(|group| InlineGroupInfo {
+            section: group.section,
+            start: group.start,
+            byte_span: group.byte_span(),
+            sites: group
+                .chain
+                .iter()
+                .filter(|site| site.kind == ExpansionKind::Macro && site.name.is_some())
+                .map(|site| SiteRef {
+                    macro_index: macro_indices[&(
+                        site.name.clone().unwrap(),
+                        site.definition_file.clone(),
+                        site.definition_line,
+                    )],
+                    invocation_file: file_indices[&site.invocation_file],
+                    invocation_line: site.invocation_line,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let debug_info_output = debug_info(
+        CuStrings {
+            producer: producer_offset,
+            name: name_offset,
+            comp_dir: comp_dir_offset,
+        },
         constants,
         &file_indices,
         &constant_name_offsets,
+        &abstract_macros,
+        &inline_groups,
     );
     // The DWARF references below point into *this object's* debug sections.
     // In object mode they are rebased by the linker through relocations
@@ -87,7 +332,7 @@ pub fn debug_sections(
     // single CU's raw offsets are already final, so no relocations are needed.
     let mut debug_info_relocs = Vec::new();
     if relocate {
-        for &(field_offset, string_offset) in &strp_fields {
+        for &(field_offset, string_offset) in &debug_info_output.strp_fields {
             debug_info_relocs.push(Reloc {
                 offset: field_offset,
                 kind: RelocKind::Abs32,
@@ -97,7 +342,7 @@ pub fn debug_sections(
         }
         // DW_AT_stmt_list: offset into this object's .debug_line.
         debug_info_relocs.push(Reloc {
-            offset: stmt_list_field,
+            offset: debug_info_output.stmt_list_field,
             kind: RelocKind::Abs32,
             target: RelocTarget::ExtraSection(DEBUG_LINE),
             addend: 0,
@@ -109,6 +354,9 @@ pub fn debug_sections(
             target: RelocTarget::ExtraSection(DEBUG_ABBREV),
             addend: 0,
         });
+        // Inline DIE `DW_AT_low_pc` fields: section-relative code addresses,
+        // rebased by LLD exactly like the line-table row addresses.
+        debug_info_relocs.extend(debug_info_output.pc_relocs);
     }
 
     vec![
@@ -120,7 +368,7 @@ pub fn debug_sections(
             link: 0,
             info: 0,
             entsize: 0,
-            data: debug_info_data,
+            data: debug_info_output.data,
             relocs: debug_info_relocs,
         },
         ExtraSection {
@@ -134,7 +382,13 @@ pub fn debug_sections(
             data: debug_abbrev(),
             relocs: Vec::new(),
         },
-        debug_line(rows, &directories, &directory_indices, &files, &file_indices),
+        debug_line(
+            &attributed_rows,
+            &directories,
+            &directory_indices,
+            &files,
+            &file_indices,
+        ),
         ExtraSection {
             name: ".debug_str".to_string(),
             sh_type: SHT_PROGBITS,
@@ -163,7 +417,8 @@ fn debug_strings(
     unit_name: &str,
     comp_dir: &str,
     constants: &[DebugConstant],
-) -> (Vec<u8>, u32, u32, u32, Vec<u32>) {
+    macros: &[(String, String, usize)],
+) -> (Vec<u8>, u32, u32, u32, Vec<u32>, Vec<u32>) {
     let mut data = Vec::new();
     let producer_offset = push_string(&mut data, "v6asm");
     let name_offset = push_string(&mut data, unit_name);
@@ -172,7 +427,18 @@ fn debug_strings(
         .iter()
         .map(|constant| push_string(&mut data, &constant.name))
         .collect();
-    (data, producer_offset, name_offset, comp_dir_offset, constant_name_offsets)
+    let macro_name_offsets = macros
+        .iter()
+        .map(|(name, _, _)| push_string(&mut data, name))
+        .collect();
+    (
+        data,
+        producer_offset,
+        name_offset,
+        comp_dir_offset,
+        constant_name_offsets,
+        macro_name_offsets,
+    )
 }
 
 fn push_string(data: &mut Vec<u8>, value: &str) -> u32 {
@@ -210,31 +476,73 @@ fn debug_abbrev() -> Vec<u8> {
     write_uleb(&mut data, 0x1c); // DW_AT_const_value
     write_uleb(&mut data, 0x0d); // DW_FORM_sdata
     data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 3); // abbreviation code
+    write_uleb(&mut data, 0x2e); // DW_TAG_subprogram (abstract macro definition)
+    data.push(0); // DW_CHILDREN_no
+    write_uleb(&mut data, 0x03); // DW_AT_name
+    write_uleb(&mut data, 0x0e); // DW_FORM_strp
+    write_uleb(&mut data, 0x3a); // DW_AT_decl_file
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    write_uleb(&mut data, 0x3b); // DW_AT_decl_line
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 4); // abbreviation code
+    write_uleb(&mut data, 0x28); // DW_TAG_inlined_subroutine
+    data.push(1); // DW_CHILDREN_yes (nested macro invocations)
+    write_uleb(&mut data, 0x31); // DW_AT_abstract_origin
+    write_uleb(&mut data, 0x12); // DW_FORM_ref4
+    write_uleb(&mut data, 0x11); // DW_AT_low_pc
+    write_uleb(&mut data, 0x01); // DW_FORM_addr
+    write_uleb(&mut data, 0x12); // DW_AT_high_pc
+    write_uleb(&mut data, 0x05); // DW_FORM_data2 (offset from low_pc)
+    write_uleb(&mut data, 0x58); // DW_AT_call_file
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    write_uleb(&mut data, 0x59); // DW_AT_call_line
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
     data.push(0); // abbreviation table terminator
     data
 }
 
+/// Offsets of the three compilation-unit strings inside `.debug_str`.
+struct CuStrings {
+    producer: u32,
+    name: u32,
+    comp_dir: u32,
+}
+
+/// The `.debug_info` byte stream plus the fields that need relocations.
+struct DebugInfoOutput {
+    data: Vec<u8>,
+    /// `(field offset, .debug_str offset)` for every `DW_FORM_strp` field.
+    strp_fields: Vec<(u32, u32)>,
+    /// Offset of the CU's `DW_AT_stmt_list` field.
+    stmt_list_field: u32,
+    /// Relocations for inline DIE `DW_AT_low_pc` fields.
+    pc_relocs: Vec<Reloc>,
+}
+
 fn debug_info(
-    producer_offset: u32,
-    name_offset: u32,
-    comp_dir_offset: u32,
+    cu_strings: CuStrings,
     constants: &[DebugConstant],
     file_indices: &BTreeMap<String, u32>,
     constant_name_offsets: &[u32],
-) -> (Vec<u8>, Vec<(u32, u32)>, u32) {
+    abstract_macros: &[AbstractMacro],
+    inline_groups: &[InlineGroupInfo],
+) -> DebugInfoOutput {
     let mut data = vec![0; 4];
     data.extend_from_slice(&4u16.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
     data.push(2); // V6C address size
     write_uleb(&mut data, 1);
     let mut strp_fields = Vec::new();
-    strp_fields.push((data.len() as u32, producer_offset));
-    data.extend_from_slice(&producer_offset.to_le_bytes());
+    strp_fields.push((data.len() as u32, cu_strings.producer));
+    data.extend_from_slice(&cu_strings.producer.to_le_bytes());
     data.extend_from_slice(&0x8001u16.to_le_bytes()); // DW_LANG_Mips_Assembler
-    strp_fields.push((data.len() as u32, name_offset));
-    data.extend_from_slice(&name_offset.to_le_bytes());
-    strp_fields.push((data.len() as u32, comp_dir_offset));
-    data.extend_from_slice(&comp_dir_offset.to_le_bytes());
+    strp_fields.push((data.len() as u32, cu_strings.name));
+    data.extend_from_slice(&cu_strings.name.to_le_bytes());
+    strp_fields.push((data.len() as u32, cu_strings.comp_dir));
+    data.extend_from_slice(&cu_strings.comp_dir.to_le_bytes());
     let stmt_list_field = data.len() as u32;
     data.extend_from_slice(&0u32.to_le_bytes()); // .debug_line offset
     for (constant, name_offset) in constants.iter().zip(constant_name_offsets) {
@@ -245,13 +553,63 @@ fn debug_info(
         write_uleb(&mut data, constant.line as u64);
         write_sleb(&mut data, constant.value);
     }
+
+    // Abstract `DW_TAG_subprogram` DIEs, one per invoked macro definition.
+    // They are emitted before the inline DIEs so their CU-relative offsets are
+    // known when `DW_AT_abstract_origin` (`DW_FORM_ref4`) references them.
+    let mut abstract_die_offsets = Vec::with_capacity(abstract_macros.len());
+    for macro_def in abstract_macros {
+        abstract_die_offsets.push(data.len() as u32);
+        write_uleb(&mut data, 3);
+        strp_fields.push((data.len() as u32, macro_def.name_offset));
+        data.extend_from_slice(&macro_def.name_offset.to_le_bytes());
+        write_uleb(&mut data, macro_def.file_index as u64);
+        write_uleb(&mut data, macro_def.line as u64);
+    }
+
+    // `DW_TAG_inlined_subroutine` DIE trees, one per contiguous expansion run,
+    // nested along the macro invocation chain. Every level covers the run's
+    // address range; the innermost level is the macro whose body produced the
+    // rows, the outer levels record the surrounding invocation chain.
+    let mut pc_relocs = Vec::new();
+    for group in inline_groups {
+        let mut levels = 0usize;
+        for site in &group.sites {
+            levels += 1;
+            write_uleb(&mut data, 4);
+            data.extend_from_slice(&abstract_die_offsets[site.macro_index].to_le_bytes());
+            let low_pc_offset = data.len() as u32;
+            data.extend_from_slice(
+                &(group.section.map_or(group.start as u16, |_| 0)).to_le_bytes(),
+            );
+            if let Some(section) = group.section {
+                pc_relocs.push(Reloc {
+                    offset: low_pc_offset,
+                    kind: RelocKind::Abs16,
+                    target: RelocTarget::Section(section),
+                    addend: group.start as i64,
+                });
+            }
+            data.extend_from_slice(&group.byte_span.to_le_bytes());
+            write_uleb(&mut data, site.invocation_file as u64);
+            write_uleb(&mut data, site.invocation_line as u64);
+        }
+        // One children terminator per open inline DIE (innermost first).
+        data.resize(data.len() + levels, 0);
+    }
+
     data.push(0); // End of compilation-unit children.
     write_initial_length(&mut data);
-    (data, strp_fields, stmt_list_field)
+    DebugInfoOutput {
+        data,
+        strp_fields,
+        stmt_list_field,
+        pc_relocs,
+    }
 }
 
 fn debug_line(
-    rows: &[DebugLineRow],
+    rows: &[AttributedRow],
     directories: &[String],
     directory_indices: &BTreeMap<String, u32>,
     files: &[String],
@@ -292,16 +650,11 @@ fn debug_line(
     let mut current_line = 1i64;
     let mut current_file = 1u32;
     let mut current_column = 0u32;
-    let mut statement_rows: Vec<&DebugLineRow> = rows.iter().filter(|row| row.is_stmt).collect();
-    statement_rows.sort_by_key(|row| {
-        (
-            row.section,
-            row.offset_or_address,
-            &row.file,
-            row.line_num,
-            row.column,
-        )
-    });
+    // Sorted by address; the stable sort keeps emission order, which matters
+    // when an invocation row and its macro body row share the entry address
+    // (the invocation row is constructed first, matching compiler output).
+    let mut statement_rows: Vec<&AttributedRow> = rows.iter().filter(|row| row.is_stmt).collect();
+    statement_rows.sort_by_key(|row| (row.section, row.offset_or_address));
     for row in statement_rows {
         if !has_sequence || active_section != row.section {
             if has_sequence {
@@ -396,11 +749,13 @@ fn write_sleb(data: &mut Vec<u8>, mut value: i64) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     use crate::assembler::{DebugLineRow, EmissionKind};
+    use crate::preprocessor::{ExpansionKind, ExpansionSite};
 
-    use super::{debug_sections, write_sleb, write_uleb, DebugConstant, ExtraSection};
+    use super::{attribute_rows, debug_sections, write_sleb, write_uleb, DebugConstant, ExtraSection};
     use super::{DEBUG_ABBREV, DEBUG_LINE, DEBUG_STR};
     use crate::object::section::{RelocKind, RelocTarget};
 
@@ -416,6 +771,7 @@ mod tests {
             kind: EmissionKind::Instruction,
             macro_context: None,
             expansion: Vec::new(),
+            origin: None,
         }
     }
 
@@ -425,6 +781,280 @@ mod tests {
 
     fn initial_length(data: &[u8]) -> usize {
         u32::from_le_bytes(data[..4].try_into().unwrap()) as usize
+    }
+
+    // ---- macro provenance helpers and minimal DWARF parsers (test-only) ----
+
+    fn macro_row(
+        section: Option<usize>,
+        offset: u32,
+        byte_len: u32,
+        file: &str,
+        line: usize,
+        origin: (&str, usize),
+        context: &str,
+        chain: Vec<ExpansionSite>,
+    ) -> DebugLineRow {
+        DebugLineRow {
+            section,
+            offset_or_address: offset,
+            byte_len,
+            file: file.to_string(),
+            line_num: line,
+            column: 0,
+            is_stmt: true,
+            kind: EmissionKind::Instruction,
+            macro_context: Some(context.to_string()),
+            expansion: chain,
+            origin: Some((origin.0.to_string(), origin.1)),
+        }
+    }
+
+    fn macro_site(
+        name: &str,
+        def_file: &str,
+        def_line: usize,
+        inv_file: &str,
+        inv_line: usize,
+    ) -> ExpansionSite {
+        ExpansionSite {
+            kind: ExpansionKind::Macro,
+            name: Some(name.to_string()),
+            definition_file: def_file.to_string(),
+            definition_line: def_line,
+            invocation_file: inv_file.to_string(),
+            invocation_line: inv_line,
+            iteration: None,
+        }
+    }
+
+    fn uleb_at(data: &[u8], pos: usize) -> (u64, usize) {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        let mut i = pos;
+        loop {
+            let byte = data[i];
+            i += 1;
+            value |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        (value, i)
+    }
+
+    fn sleb_at(data: &[u8], pos: usize) -> (i64, usize) {
+        let mut value = 0i64;
+        let mut shift = 0u32;
+        let mut i = pos;
+        loop {
+            let byte = data[i];
+            i += 1;
+            value |= ((byte & 0x7f) as i64) << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                if shift < 64 && byte & 0x40 != 0 {
+                    value |= -1i64 << shift;
+                }
+                break;
+            }
+        }
+        (value, i)
+    }
+
+    /// One decoded `.debug_line` statement row.
+    #[derive(Debug, PartialEq)]
+    struct LineRow {
+        address: u64,
+        file: u32,
+        line: i64,
+        column: u64,
+    }
+
+    /// Decode a `.debug_line` section into its file table and row sequence.
+    fn line_table(data: &[u8]) -> (Vec<String>, Vec<LineRow>) {
+        let opcode_base = data[15] as usize;
+        let line_base = data[13] as i8 as i64;
+        let line_range = data[14] as i64;
+        let mut pos = 16 + opcode_base - 1; // skip standard_opcode_lengths
+        // include directories
+        loop {
+            let end = data[pos..].iter().position(|&b| b == 0).unwrap() + pos;
+            if end == pos {
+                pos += 1;
+                break;
+            }
+            pos = end + 1;
+        }
+        // file names
+        let mut files = Vec::new();
+        loop {
+            let end = data[pos..].iter().position(|&b| b == 0).unwrap() + pos;
+            if end == pos {
+                pos += 1;
+                break;
+            }
+            files.push(String::from_utf8_lossy(&data[pos..end]).into_owned());
+            pos = end + 1;
+            for _ in 0..3 {
+                let (_, next) = uleb_at(data, pos);
+                pos = next;
+            }
+        }
+        // line program
+        let mut rows = Vec::new();
+        let (mut address, mut file, mut line, mut column) = (0u64, 1u32, 1i64, 0u64);
+        while pos < data.len() {
+            let opcode = data[pos];
+            pos += 1;
+            match opcode {
+                0 => {
+                    let (length, next) = uleb_at(data, pos);
+                    pos = next;
+                    let end = pos + length as usize;
+                    match data[pos] {
+                        1 => break, // end_sequence terminates the sequence
+                        2 => {
+                            address = u16::from_le_bytes(
+                                data[pos + 1..pos + 3].try_into().unwrap(),
+                            ) as u64;
+                        }
+                        _ => {}
+                    }
+                    pos = end;
+                }
+                1 => rows.push(LineRow { address, file, line, column }), // copy
+                2 => {
+                    let (delta, next) = uleb_at(data, pos);
+                    pos = next;
+                    address += delta;
+                }
+                3 => {
+                    let (delta, next) = sleb_at(data, pos);
+                    pos = next;
+                    line += delta;
+                }
+                4 => {
+                    let (value, next) = uleb_at(data, pos);
+                    pos = next;
+                    file = value as u32;
+                }
+                5 => {
+                    let (value, next) = uleb_at(data, pos);
+                    pos = next;
+                    column = value;
+                }
+                8 => {
+                    // const_add_pc: advance like the largest special opcode.
+                    address += (255 - opcode_base) as u64;
+                }
+                9 => {
+                    address = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as u64;
+                    pos += 2;
+                }
+                opcode if opcode as usize >= opcode_base => {
+                    let adjusted = (opcode - opcode_base as u8) as i64;
+                    address += adjusted as u64;
+                    line += line_base + adjusted * line_range;
+                    rows.push(LineRow { address, file, line, column });
+                }
+                _ => {} // negate_stmt / set_basic_block / set_isa: no operands needed
+            }
+        }
+        (files, rows)
+    }
+
+    /// One decoded `.debug_info` DIE.
+    #[derive(Debug)]
+    struct Die {
+        offset: usize,
+        tag: u8,
+        /// (attribute, form, raw value bytes)
+        attrs: Vec<(u8, u8, Vec<u8>)>,
+    }
+
+    fn attr(die: &Die, attribute: u8) -> &[u8] {
+        &die.attrs.iter().find(|(at, _, _)| *at == attribute).unwrap().2
+    }
+
+    fn str_at(debug_str: &[u8], offset: u32) -> String {
+        let start = offset as usize;
+        let end = start + debug_str[start..].iter().position(|&b| b == 0).unwrap();
+        String::from_utf8_lossy(&debug_str[start..end]).into_owned()
+    }
+
+    fn read_form(data: &[u8], pos: usize, form: u8, address_size: usize) -> (Vec<u8>, usize) {
+        match form {
+            0x01 => (data[pos..pos + address_size].to_vec(), pos + address_size), // addr
+            0x05 => (data[pos..pos + 2].to_vec(), pos + 2),  // data2
+            0x0e => (data[pos..pos + 4].to_vec(), pos + 4),  // strp
+            0x12 => (data[pos..pos + 4].to_vec(), pos + 4),  // ref4
+            0x17 => (data[pos..pos + 4].to_vec(), pos + 4),  // sec_offset
+            0x0a => (data[pos..pos + 1].to_vec(), pos + 1),  // data1
+            0x0f => {
+                let (_, next) = uleb_at(data, pos);
+                (data[pos..next].to_vec(), next)
+            }
+            0x0d => {
+                let (_, next) = sleb_at(data, pos);
+                (data[pos..next].to_vec(), next)
+            }
+            other => panic!("unsupported DWARF form {other:#x} in test parser"),
+        }
+    }
+
+    /// Decode the `.debug_info` DIE stream (first compilation unit).
+    fn parse_dies(info: &[u8], abbrev: &[u8]) -> Vec<Die> {
+        // abbreviation declarations: code -> (tag, has_children, attribute/form pairs)
+        let mut table: BTreeMap<u64, (u8, bool, Vec<(u8, u8)>)> = BTreeMap::new();
+        let mut i = 0usize;
+        while abbrev[i] != 0 {
+            let (code, next) = uleb_at(abbrev, i);
+            i = next;
+            let tag = abbrev[i];
+            i += 1;
+            let has_children = abbrev[i] == 1;
+            i += 1;
+            let mut attrs = Vec::new();
+            loop {
+                if abbrev[i] == 0 && abbrev[i + 1] == 0 {
+                    i += 2;
+                    break;
+                }
+                attrs.push((abbrev[i], abbrev[i + 1]));
+                i += 2;
+            }
+            table.insert(code, (tag, has_children, attrs));
+        }
+        let address_size = info[10] as usize;
+        let mut pos = 11usize; // past the CU header
+        let mut dies = Vec::new();
+        let mut open = 0usize;
+        while pos < info.len() {
+            let offset = pos;
+            let (code, next) = uleb_at(info, pos);
+            pos = next;
+            if code == 0 {
+                if open == 0 {
+                    break; // end of compilation-unit children
+                }
+                open -= 1;
+                continue;
+            }
+            let (tag, has_children, attrs) = table[&code].clone();
+            let mut values = Vec::new();
+            for (attribute, form) in attrs {
+                let (bytes, next) = read_form(info, pos, form, address_size);
+                values.push((attribute, form, bytes));
+                pos = next;
+            }
+            if has_children {
+                open += 1;
+            }
+            dies.push(Die { offset, tag, attrs: values });
+        }
+        dies
     }
 
     #[test]
@@ -602,5 +1232,231 @@ mod tests {
         let info = &section(&sections, ".debug_info").data;
         assert_eq!(&info[12..16], &0u32.to_le_bytes()); // producer = 0
         assert_eq!(u32::from_le_bytes(info[6..10].try_into().unwrap()), 0); // abbrev_offset
+    }
+
+    #[test]
+    fn attribute_rows_split_groups_on_gaps_and_new_chains() {
+        let chain_a = vec![macro_site("A", "m.asm", 1, "main.asm", 10)];
+        let chain_b = vec![macro_site("B", "m.asm", 5, "main.asm", 11)];
+        let rows = vec![
+            macro_row(Some(0), 0, 1, "main.asm", 10, ("m.asm", 2), "A_1", chain_a.clone()),
+            macro_row(Some(0), 1, 1, "main.asm", 10, ("m.asm", 3), "A_1", chain_a.clone()),
+            macro_row(Some(0), 2, 1, "main.asm", 11, ("m.asm", 6), "B_2", chain_b),
+            macro_row(Some(0), 3, 1, "main.asm", 10, ("m.asm", 4), "A_1", chain_a),
+        ];
+
+        let (attributed, groups) = attribute_rows(&rows);
+
+        // Entry rows keep the invocation site; every row maps to its body line.
+        assert_eq!(attributed.len(), 6);
+        assert_eq!((attributed[0].file.as_str(), attributed[0].line_num), ("main.asm", 10));
+        assert_eq!((attributed[1].file.as_str(), attributed[1].line_num), ("m.asm", 2));
+        assert_eq!((attributed[2].file.as_str(), attributed[2].line_num), ("m.asm", 3));
+        assert_eq!((attributed[3].file.as_str(), attributed[3].line_num), ("main.asm", 11));
+        assert_eq!((attributed[4].file.as_str(), attributed[4].line_num), ("m.asm", 6));
+        assert_eq!((attributed[5].file.as_str(), attributed[5].line_num), ("m.asm", 4));
+
+        // A's contiguous run [0,2), the nested B run [2,3), and A resumed [3,4).
+        assert_eq!(groups.len(), 3);
+        assert_eq!((groups[0].start, groups[0].end), (0, 2));
+        assert_eq!((groups[1].start, groups[1].end), (2, 3));
+        assert_eq!((groups[2].start, groups[2].end), (3, 4));
+        assert_eq!(groups[1].chain.len(), 1);
+        assert_eq!(groups[1].chain[0].name.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn attribute_rows_split_loop_iterations_into_separate_inline_instances() {
+        let mut chain_first = vec![macro_site("A", "m.asm", 1, "main.asm", 10)];
+        chain_first.push(ExpansionSite {
+            kind: ExpansionKind::Loop,
+            name: None,
+            definition_file: "main.asm".to_string(),
+            definition_line: 9,
+            invocation_file: "main.asm".to_string(),
+            invocation_line: 9,
+            iteration: Some(0),
+        });
+        let mut chain_second = chain_first.clone();
+        chain_second[1].iteration = Some(1);
+        let rows = vec![
+            macro_row(Some(0), 0, 1, "main.asm", 10, ("m.asm", 2), "A_1", chain_first),
+            macro_row(Some(0), 1, 1, "main.asm", 10, ("m.asm", 2), "A_1", chain_second),
+        ];
+
+        let (_, groups) = attribute_rows(&rows);
+
+        // Contiguous addresses, but each iteration is its own inline instance.
+        assert_eq!(groups.len(), 2);
+        assert_eq!((groups[0].start, groups[0].end), (0, 1));
+        assert_eq!((groups[1].start, groups[1].end), (1, 2));
+    }
+
+    #[test]
+    fn macro_rows_map_body_lines_and_keep_invocation_entry_row() {
+        let chain = vec![macro_site("PAUSE", "engine/macros.asm", 299, "main.asm", 42)];
+        let rows = vec![
+            macro_row(Some(0), 0, 2, "main.asm", 42, ("engine/macros.asm", 304), "PAUSE_1", chain.clone()),
+            macro_row(Some(0), 2, 1, "main.asm", 42, ("engine/macros.asm", 305), "PAUSE_1", chain),
+        ];
+
+        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), true);
+        let line = section(&sections, ".debug_line");
+        let (files, line_rows) = line_table(&line.data);
+
+        assert!(files.iter().any(|file| file == "macros.asm"));
+        assert!(files.iter().any(|file| file == "main.asm"));
+        assert_eq!(line_rows.len(), 3);
+        // Entry address 0: invocation row first, then the macro body row.
+        // (The line-table file table stores basenames; in object mode every
+        // SET_ADDRESS field is zero-baked and fixed up via relocations.)
+        assert_eq!(line_rows[0].file as usize - 1, files.iter().position(|file| file == "main.asm").unwrap());
+        assert_eq!(line_rows[0].line, 42);
+        assert_eq!(line_rows[1].file as usize - 1, files.iter().position(|file| file == "macros.asm").unwrap());
+        assert_eq!(line_rows[1].line, 304);
+        assert_eq!(line_rows[2].line, 305);
+        let addends: Vec<i64> = line.relocs.iter().map(|reloc| reloc.addend).collect();
+        assert_eq!(addends, [0, 0, 2]);
+    }
+
+    #[test]
+    fn macro_expansion_emits_abstract_subprogram_and_inline_dies() {
+        let chain = vec![macro_site("PAUSE", "engine/macros.asm", 299, "main.asm", 42)];
+        let rows = vec![macro_row(
+            Some(0),
+            4,
+            2,
+            "main.asm",
+            42,
+            ("engine/macros.asm", 304),
+            "PAUSE_1",
+            chain,
+        )];
+
+        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), true);
+        let info = section(&sections, ".debug_info");
+        let dies = parse_dies(&info.data, &section(&sections, ".debug_abbrev").data);
+        let str_data = &section(&sections, ".debug_str").data;
+        let (files, _) = line_table(&section(&sections, ".debug_line").data);
+
+        let subprograms: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x2e).collect();
+        assert_eq!(subprograms.len(), 1);
+        let name_offset = u32::from_le_bytes(attr(subprograms[0], 0x03).try_into().unwrap());
+        assert_eq!(str_at(str_data, name_offset), "PAUSE");
+        let macros_index =
+            files.iter().position(|file| file == "macros.asm").unwrap() as u32 + 1;
+        assert_eq!(uleb_at(attr(subprograms[0], 0x3a), 0).0, macros_index as u64);
+        assert_eq!(uleb_at(attr(subprograms[0], 0x3b), 0).0, 299);
+
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        assert_eq!(inlines.len(), 1);
+        let origin_ref = u32::from_le_bytes(attr(inlines[0], 0x31).try_into().unwrap());
+        assert_eq!(origin_ref as usize, subprograms[0].offset);
+        // low_pc is a zero-baked section-relative field; high_pc is the run span.
+        assert_eq!(attr(inlines[0], 0x11), &[0, 0]);
+        assert_eq!(attr(inlines[0], 0x12), &[2, 0]);
+        let main_index = files.iter().position(|file| file == "main.asm").unwrap() as u32 + 1;
+        assert_eq!(uleb_at(attr(inlines[0], 0x58), 0).0, main_index as u64);
+        assert_eq!(uleb_at(attr(inlines[0], 0x59), 0).0, 42);
+
+        // The low_pc field carries a section-relative code relocation.
+        let reloc = info.relocs.iter().find(|reloc| reloc.kind == RelocKind::Abs16).unwrap();
+        assert_eq!(reloc.target, RelocTarget::Section(0));
+        assert_eq!(reloc.addend, 4);
+        assert_eq!(&info.data[reloc.offset as usize..reloc.offset as usize + 2], &[0, 0]);
+    }
+
+    #[test]
+    fn nested_macro_expansions_nest_inline_dies() {
+        let outer = macro_site("OUTER", "lib/macros.asm", 10, "main.asm", 7);
+        let inner = macro_site("INNER", "lib/macros.asm", 2, "lib/macros.asm", 12);
+        let rows = vec![macro_row(
+            Some(0),
+            0,
+            1,
+            "main.asm",
+            7,
+            ("lib/macros.asm", 3),
+            "INNER_2",
+            vec![outer, inner],
+        )];
+
+        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), true);
+        let dies = parse_dies(
+            &section(&sections, ".debug_info").data,
+            &section(&sections, ".debug_abbrev").data,
+        );
+        let str_data = &section(&sections, ".debug_str").data;
+        let (files, _) = line_table(&section(&sections, ".debug_line").data);
+
+        let subprograms: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x2e).collect();
+        assert_eq!(subprograms.len(), 2);
+        let mut definitions: Vec<(String, u64)> = subprograms
+            .iter()
+            .map(|die| {
+                (
+                    str_at(str_data, u32::from_le_bytes(attr(die, 0x03).try_into().unwrap())),
+                    uleb_at(attr(die, 0x3b), 0).0,
+                )
+            })
+            .collect();
+        definitions.sort();
+        assert_eq!(definitions, vec![("INNER".to_string(), 2), ("OUTER".to_string(), 10)]);
+
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        assert_eq!(inlines.len(), 2);
+        let find_abstract = |name: &str| {
+            subprograms
+                .iter()
+                .find(|die| {
+                    str_at(str_data, u32::from_le_bytes(attr(die, 0x03).try_into().unwrap())) == name
+                })
+                .unwrap()
+                .offset
+        };
+        // The outer inline DIE precedes the inner one, which it nests.
+        assert_eq!(
+            u32::from_le_bytes(attr(inlines[0], 0x31).try_into().unwrap()) as usize,
+            find_abstract("OUTER")
+        );
+        assert_eq!(
+            u32::from_le_bytes(attr(inlines[1], 0x31).try_into().unwrap()) as usize,
+            find_abstract("INNER")
+        );
+        // Outer call site: main.asm:7. Inner call site: the outer body line 12.
+        let main_index = files.iter().position(|file| file == "main.asm").unwrap() as u32 + 1;
+        assert_eq!(uleb_at(attr(inlines[0], 0x58), 0).0, main_index as u64);
+        assert_eq!(uleb_at(attr(inlines[0], 0x59), 0).0, 7);
+        let macros_index =
+            files.iter().position(|file| file == "macros.asm").unwrap() as u32 + 1;
+        assert_eq!(uleb_at(attr(inlines[1], 0x58), 0).0, macros_index as u64);
+        assert_eq!(uleb_at(attr(inlines[1], 0x59), 0).0, 12);
+        // Both levels cover the same single-instruction run.
+        assert_eq!(attr(inlines[0], 0x12), &[1, 0]);
+        assert_eq!(attr(inlines[1], 0x12), &[1, 0]);
+    }
+
+    #[test]
+    fn rom_companion_bakes_absolute_inline_addresses_without_relocations() {
+        let chain = vec![macro_site("PAUSE", "engine/macros.asm", 299, "main.asm", 42)];
+        let rows = vec![macro_row(
+            None,
+            0x1234,
+            2,
+            "main.asm",
+            42,
+            ("engine/macros.asm", 304),
+            "PAUSE_1",
+            chain,
+        )];
+
+        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), false);
+        let info = section(&sections, ".debug_info");
+        assert!(info.relocs.is_empty());
+        let dies = parse_dies(&info.data, &section(&sections, ".debug_abbrev").data);
+        let inlines: Vec<&Die> = dies.iter().filter(|die| die.tag == 0x28).collect();
+        assert_eq!(inlines.len(), 1);
+        assert_eq!(attr(inlines[0], 0x11), &[0x34, 0x12]);
+        assert_eq!(attr(inlines[0], 0x12), &[2, 0]);
     }
 }

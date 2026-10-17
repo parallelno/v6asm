@@ -176,6 +176,9 @@ pub struct DebugLineRow {
     pub macro_context: Option<String>,
     /// Definition and invocation sites for each nested macro expansion.
     pub expansion: Vec<crate::preprocessor::ExpansionSite>,
+    /// The macro body line this row's text was expanded from, mirroring
+    /// `SourceLine.origin` (`None` for non-expanded rows).
+    pub origin: Option<(String, usize)>,
 }
 
 /// Assembler settings that can be modified by .setting
@@ -1112,6 +1115,7 @@ impl Assembler {
                 kind,
                 macro_context: line.macro_context.clone(),
                 expansion: line.expansion.clone(),
+                origin: line.origin.clone(),
             });
         }
     }

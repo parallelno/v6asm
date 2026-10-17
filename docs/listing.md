@@ -83,8 +83,10 @@ All seven `hlt` instructions share line number 62 from the source, with addresse
 Macro invocations are expanded similarly to loops. The listing shows each expanded instruction with the address and bytes it produces, using the line numbers from the macro definition body.
 
 This is intentionally different from DWARF debug metadata: with `-g -f obj`,
-generated instructions map to the macro invocation line so source breakpoints
-work at the call site. See [Debug Metadata](debug-metadata.md).
+macro body instructions map to the macro definition lines (with an extra
+statement row at the invocation line so call-site breakpoints still work), and
+each expansion is additionally described by a `DW_TAG_inlined_subroutine` DIE.
+See [Debug Metadata](debug-metadata.md).
 
 ## Line Separator
 
