@@ -75,6 +75,7 @@ fn test_macro_lookup_is_case_insensitive() {
             text: "nop".to_string(),
             file: "test.asm".to_string(),
             line: 1,
+            column_offset: 0,
         }],
         file: "test.asm".to_string(),
         line: 1,

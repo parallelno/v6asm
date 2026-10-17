@@ -69,6 +69,9 @@ pub struct ExpansionSite {
     pub definition_line: usize,
     pub invocation_file: String,
     pub invocation_line: usize,
+    /// One-based column of the invocation within its physical source line
+    /// (the first non-whitespace character of the invoking statement).
+    pub invocation_column: usize,
     pub iteration: Option<usize>,
 }
 
@@ -498,6 +501,10 @@ fn collect_macros(lines: &mut Vec<SourceLine>, symbols: &mut SymbolTable) -> Asm
                     text: lines[i].text.clone(),
                     file: lines[i].file.clone(),
                     line: lines[i].line_num,
+                    // Body lines are stored after `\` statement splitting, so
+                    // this is the statement's zero-based start within its
+                    // physical source line.
+                    column_offset: lines[i].column_offset,
                 });
             }
             i += 1;
@@ -598,6 +605,16 @@ pub fn parse_macro_params(s: &str) -> Vec<MacroParam> {
     params
 }
 
+/// One-based column of the first non-whitespace character of `line`'s
+/// statement within its physical source line. Uses the same arithmetic as
+/// ordinary statement rows: `column_offset` (which includes the statement's
+/// leading whitespace) plus the whitespace width that the lexer's
+/// within-text column re-counts.
+pub fn statement_column(line: &SourceLine) -> usize {
+    let leading = line.text.len() - line.text.trim_start().len();
+    line.column_offset + leading + 1
+}
+
 /// Expand a macro invocation into source lines
 pub fn expand_macro(
     macro_def: &MacroDef,
@@ -634,12 +651,17 @@ pub fn expand_macro(
             // the actual line where this macro was invoked.
             invocation_file: call_source.diag_file().to_string(),
             invocation_line: call_source.diag_line(),
+            invocation_column: statement_column(call_source),
             iteration: None,
         });
         body_text.push(SourceLine {
             file: call_source.file.clone(),
             line_num: call_source.line_num,
-            column_offset: call_source.column_offset,
+            // The expanded text is the macro body statement, so its column
+            // offset must be that statement's own offset within the macro
+            // body's physical line — never the invocation line's offset, which
+            // would mix two different strings into one meaningless column.
+            column_offset: body_line.column_offset,
             text: expanded,
             macro_context: Some(format!("{}_{}", macro_def.name, call_index)),
             expansion,

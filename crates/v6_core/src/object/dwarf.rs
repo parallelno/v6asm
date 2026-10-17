@@ -78,15 +78,16 @@ struct SiteRef {
     macro_index: usize,
     invocation_file: u32,
     invocation_line: usize,
+    /// One-based column of the invocation within its physical line.
+    invocation_column: usize,
 }
 
-/// The invocation site of the innermost macro level of an expansion chain.
-fn macro_invocation_site(chain: &[ExpansionSite]) -> Option<(String, usize)> {
+/// The innermost macro level of an expansion chain.
+fn macro_invocation_site(chain: &[ExpansionSite]) -> Option<&ExpansionSite> {
     chain
         .iter()
         .rev()
         .find(|site| site.kind == ExpansionKind::Macro)
-        .map(|site| (site.invocation_file.clone(), site.invocation_line))
 }
 
 /// Re-attribute macro-expanded rows to their macro body lines and collect the
@@ -143,16 +144,25 @@ fn attribute_rows(rows: &[DebugLineRow]) -> (Vec<AttributedRow>, Vec<InlineGroup
                     .unwrap_or_else(|| (row.file.clone(), row.line_num));
                 if entered.insert(context.clone()) {
                     // Entry row: keep a statement row at the invocation site so
-                    // a breakpoint on the call line resolves to this code.
-                    let (invocation_file, invocation_line) =
-                        macro_invocation_site(chain)
-                            .unwrap_or_else(|| (row.file.clone(), row.line_num));
+                    // a breakpoint on the call line resolves to this code. Its
+                    // column is the invocation's own position, not the body
+                    // statement's.
+                    let invocation = macro_invocation_site(chain);
+                    let (invocation_file, invocation_line, invocation_column) = invocation
+                        .map(|site| {
+                            (
+                                site.invocation_file.clone(),
+                                site.invocation_line,
+                                site.invocation_column as u32,
+                            )
+                        })
+                        .unwrap_or_else(|| (row.file.clone(), row.line_num, row.column));
                     attributed.push(AttributedRow {
                         section: row.section,
                         offset_or_address: row.offset_or_address,
                         file: invocation_file,
                         line_num: invocation_line,
-                        column: row.column,
+                        column: invocation_column,
                         is_stmt: row.is_stmt,
                     });
                 }
@@ -309,6 +319,7 @@ pub fn debug_sections(
                     )],
                     invocation_file: file_indices[&site.invocation_file],
                     invocation_line: site.invocation_line,
+                    invocation_column: site.invocation_column,
                 })
                 .collect(),
         })
@@ -499,6 +510,8 @@ fn debug_abbrev() -> Vec<u8> {
     write_uleb(&mut data, 0x0f); // DW_FORM_udata
     write_uleb(&mut data, 0x59); // DW_AT_call_line
     write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    write_uleb(&mut data, 0x5a); // DW_AT_call_column
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
     data.extend_from_slice(&[0, 0]); // attribute/form terminator
     data.push(0); // abbreviation table terminator
     data
@@ -593,6 +606,7 @@ fn debug_info(
             data.extend_from_slice(&group.byte_span.to_le_bytes());
             write_uleb(&mut data, site.invocation_file as u64);
             write_uleb(&mut data, site.invocation_line as u64);
+            write_uleb(&mut data, site.invocation_column as u64);
         }
         // One children terminator per open inline DIE (innermost first).
         data.resize(data.len() + levels, 0);
@@ -817,6 +831,17 @@ mod tests {
         inv_file: &str,
         inv_line: usize,
     ) -> ExpansionSite {
+        macro_site_with_column(name, def_file, def_line, inv_file, inv_line, 1)
+    }
+
+    fn macro_site_with_column(
+        name: &str,
+        def_file: &str,
+        def_line: usize,
+        inv_file: &str,
+        inv_line: usize,
+        inv_column: usize,
+    ) -> ExpansionSite {
         ExpansionSite {
             kind: ExpansionKind::Macro,
             name: Some(name.to_string()),
@@ -824,6 +849,7 @@ mod tests {
             definition_line: def_line,
             invocation_file: inv_file.to_string(),
             invocation_line: inv_line,
+            invocation_column: inv_column,
             iteration: None,
         }
     }
@@ -1275,6 +1301,7 @@ mod tests {
             definition_line: 9,
             invocation_file: "main.asm".to_string(),
             invocation_line: 9,
+            invocation_column: 1,
             iteration: Some(0),
         });
         let mut chain_second = chain_first.clone();
@@ -1294,7 +1321,7 @@ mod tests {
 
     #[test]
     fn macro_rows_map_body_lines_and_keep_invocation_entry_row() {
-        let chain = vec![macro_site("PAUSE", "engine/macros.asm", 299, "main.asm", 42)];
+        let chain = vec![macro_site_with_column("PAUSE", "engine/macros.asm", 299, "main.asm", 42, 11)];
         let rows = vec![
             macro_row(Some(0), 0, 2, "main.asm", 42, ("engine/macros.asm", 304), "PAUSE_1", chain.clone()),
             macro_row(Some(0), 2, 1, "main.asm", 42, ("engine/macros.asm", 305), "PAUSE_1", chain),
@@ -1315,13 +1342,18 @@ mod tests {
         assert_eq!(line_rows[1].file as usize - 1, files.iter().position(|file| file == "macros.asm").unwrap());
         assert_eq!(line_rows[1].line, 304);
         assert_eq!(line_rows[2].line, 305);
+        // The entry row points at the invocation's own column (11); the body
+        // rows keep the body statement's column (0 in this fixture).
+        assert_eq!(line_rows[0].column, 11);
+        assert_eq!(line_rows[1].column, 0);
+        assert_eq!(line_rows[2].column, 0);
         let addends: Vec<i64> = line.relocs.iter().map(|reloc| reloc.addend).collect();
         assert_eq!(addends, [0, 0, 2]);
     }
 
     #[test]
     fn macro_expansion_emits_abstract_subprogram_and_inline_dies() {
-        let chain = vec![macro_site("PAUSE", "engine/macros.asm", 299, "main.asm", 42)];
+        let chain = vec![macro_site_with_column("PAUSE", "engine/macros.asm", 299, "main.asm", 42, 11)];
         let rows = vec![macro_row(
             Some(0),
             4,
@@ -1358,6 +1390,7 @@ mod tests {
         let main_index = files.iter().position(|file| file == "main.asm").unwrap() as u32 + 1;
         assert_eq!(uleb_at(attr(inlines[0], 0x58), 0).0, main_index as u64);
         assert_eq!(uleb_at(attr(inlines[0], 0x59), 0).0, 42);
+        assert_eq!(uleb_at(attr(inlines[0], 0x5a), 0).0, 11);
 
         // The low_pc field carries a section-relative code relocation.
         let reloc = info.relocs.iter().find(|reloc| reloc.kind == RelocKind::Abs16).unwrap();
@@ -1368,8 +1401,8 @@ mod tests {
 
     #[test]
     fn nested_macro_expansions_nest_inline_dies() {
-        let outer = macro_site("OUTER", "lib/macros.asm", 10, "main.asm", 7);
-        let inner = macro_site("INNER", "lib/macros.asm", 2, "lib/macros.asm", 12);
+        let outer = macro_site_with_column("OUTER", "lib/macros.asm", 10, "main.asm", 7, 5);
+        let inner = macro_site_with_column("INNER", "lib/macros.asm", 2, "lib/macros.asm", 12, 13);
         let rows = vec![macro_row(
             Some(0),
             0,
@@ -1427,10 +1460,12 @@ mod tests {
         let main_index = files.iter().position(|file| file == "main.asm").unwrap() as u32 + 1;
         assert_eq!(uleb_at(attr(inlines[0], 0x58), 0).0, main_index as u64);
         assert_eq!(uleb_at(attr(inlines[0], 0x59), 0).0, 7);
+        assert_eq!(uleb_at(attr(inlines[0], 0x5a), 0).0, 5);
         let macros_index =
             files.iter().position(|file| file == "macros.asm").unwrap() as u32 + 1;
         assert_eq!(uleb_at(attr(inlines[1], 0x58), 0).0, macros_index as u64);
         assert_eq!(uleb_at(attr(inlines[1], 0x59), 0).0, 12);
+        assert_eq!(uleb_at(attr(inlines[1], 0x5a), 0).0, 13);
         // Both levels cover the same single-instruction run.
         assert_eq!(attr(inlines[0], 0x12), &[1, 0]);
         assert_eq!(attr(inlines[1], 0x12), &[1, 0]);

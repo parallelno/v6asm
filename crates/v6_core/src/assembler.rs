@@ -834,6 +834,7 @@ impl Assembler {
                                         definition_line: line.diag_line(),
                                         invocation_file: line.diag_file().to_string(),
                                         invocation_line: line.diag_line(),
+                                        invocation_column: crate::preprocessor::statement_column(line),
                                         iteration: Some(iteration),
                                     });
                                 }

@@ -44,12 +44,15 @@ pub struct MacroDef {
 ///
 /// Retaining each body line's original file/line lets diagnostics that fire
 /// while the macro is being expanded point back at the macro definition
-/// instead of the invocation site.
+/// instead of the invocation site. Body lines are stored after `\` statement
+/// splitting, so `column_offset` is the zero-based start of this statement
+/// within its physical source line.
 #[derive(Debug, Clone)]
 pub struct MacroBodyLine {
     pub text: String,
     pub file: String,
     pub line: usize,
+    pub column_offset: usize,
 }
 
 #[derive(Debug, Clone)]

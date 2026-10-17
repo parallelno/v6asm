@@ -269,6 +269,46 @@ fn debug_rows_keep_macro_definition_and_invocation_provenance() {
     assert_eq!(row.expansion[0].name.as_deref(), Some("pause"));
     assert_eq!(row.expansion[0].definition_line, 1);
     assert_eq!(row.expansion[0].invocation_line, 4);
+    assert_eq!(row.expansion[0].invocation_column, 1);
+}
+
+#[test]
+fn macro_rows_carry_body_statement_columns_not_invocation_hybrids() {
+    // The invocation is the second statement of a split physical line
+    // (`    hlt \ pause() ; call`, statement at 1-based column 11). The macro
+    // body statement (`    nop` on body line 2) must keep its own column 5 —
+    // never invocation_offset(9) + body column(5) = 14.
+    let asm = assemble_obj(".macro pause\n    nop\n.endmacro\n    hlt \\ pause() ; call\n").unwrap();
+    let hlt = &asm.debug_rows[0];
+    assert!(!hlt.macro_context.is_some());
+    assert_eq!((hlt.line_num, hlt.column), (4, 5));
+    let macro_row = &asm.debug_rows[1];
+    assert_eq!(macro_row.origin, Some(("main.asm".to_string(), 2)));
+    assert_eq!((macro_row.line_num, macro_row.column), (4, 5));
+
+    // A split statement inside the body (`    nop \ nop` on body line 2)
+    // yields two rows on the same body line with their true physical columns
+    // 5 and 11 — previously they got two arbitrary hybrid columns (5 and 2).
+    let asm = assemble_obj(".macro pause\n    nop \\ nop\n.endmacro\npause()\n").unwrap();
+    let rows = &asm.debug_rows;
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row.origin, Some(("main.asm".to_string(), 2)));
+    }
+    assert_eq!(rows[0].column, 5);
+    assert_eq!(rows[1].column, 11);
+
+    // Nested macros: the inner invocation's recorded column is the outer body
+    // statement's own position (`    inner()` at 1-based column 5), not a
+    // value derived from the outer invocation line.
+    let asm = assemble_obj(
+        ".macro inner\n    nop\n.endmacro\n.macro outer\n    inner()\n    nop\n.endmacro\nouter()\n",
+    )
+    .unwrap();
+    let inner_row = asm.debug_rows.iter().find(|row| row.expansion.len() == 2).unwrap();
+    assert_eq!(inner_row.expansion[1].invocation_column, 5);
+    let outer_row = asm.debug_rows.iter().find(|row| row.expansion.len() == 1).unwrap();
+    assert_eq!(outer_row.expansion[0].invocation_column, 1);
 }
 
 #[test]

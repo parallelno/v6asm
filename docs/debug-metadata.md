@@ -83,18 +83,18 @@ gaps are not breakpoint targets.
   can share a source line while having different linked addresses. The internal
   row model retains the iteration number as expansion provenance.
 - A macro-expanded instruction maps to the macro body line it was expanded
-  from, and the first instruction of an expansion also keeps a statement row
-  at the invocation line. A breakpoint on the macro call still stops in its
-  generated code, while stepping inside the expansion shows the macro
-  definition.
+  from, at the body statement's own column, and the first instruction of an
+  expansion also keeps a statement row at the invocation line and column. A
+  breakpoint on the macro call still stops in its generated code, while
+  stepping inside the expansion shows the macro definition.
 - `.debug_info` models macro provenance the way C compilers model inlining:
   every invoked macro definition gets an abstract `DW_TAG_subprogram` DIE
   (named after the macro, declared at its `.macro` line), and every contiguous
   expansion run gets a `DW_TAG_inlined_subroutine` DIE covering the expanded
-  instructions with `DW_AT_call_file`/`DW_AT_call_line` pointing at the
-  invocation site. Nested macro invocations produce nested inline DIEs, so
-  debuggers can step into macro bodies and show the macro invocation chain on
-  the call stack.
+  instructions with `DW_AT_call_file`/`DW_AT_call_line`/`DW_AT_call_column`
+  pointing at the invocation site. Nested macro invocations produce nested
+  inline DIEs, so debuggers can step into macro bodies and show the macro
+  invocation chain on the call stack.
 - Multiple instructions separated by `\` on one physical source line produce
   separate rows at their respective instruction starts and physical columns.
 
