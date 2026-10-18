@@ -24,6 +24,7 @@ BASE_Y  = pool.y
 [expect.symbols]
 pool = 256
 "pool.end" = 271
+"pool.size" = 15
 "mob.size" = 5
 E2_X = 267
 B_STATE = 261

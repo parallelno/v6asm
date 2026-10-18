@@ -23,8 +23,11 @@ after:
 
 [expect.symbols]
 hero = 256
+"hero.end" = 259
+"hero.size" = 3
 pool = 259
 "pool.end" = 268
+"pool.size" = 9
 HERO_LEN = 3
 POOL_LEN = 9
 after = 268

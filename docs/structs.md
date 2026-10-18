@@ -161,11 +161,16 @@ resolution and are covered by `.global *`.
 ;   actor.size       = 7
 ```
 
-Every instance and pool also gets an auto-generated `<label>.end` symbol —
-the address one past its last byte. For raw `.storage <name>.size * N`
-reservations there is no auto end label (the assembler cannot know the
-`.storage` argument means "N structs"); such pools keep hand-written end
-labels or `label + <name>.size * N` arithmetic.
+Every instance and pool also gets auto-generated `<label>.size` and
+`<label>.end` symbols:
+
+| Symbol          | Meaning                                            |
+|-----------------|----------------------------------------------------|
+| `<label>.size`  | Total byte count of the instance (count × `<name>.size` for pools) |
+| `<label>.end`   | Address one past the instance's last byte          |
+
+`<label>.size` is a plain absolute constant (a length, not an address), so
+`pool.size` equals `pool.end - pool`.
 
 The field names `size` and `end` are reserved: `size` would collide with the
 generated struct size constant, and `end` with the generated instance end
@@ -184,6 +189,8 @@ char_pool: char[12]   ; 12 uninitialized instances, 12 * char.size bytes
 - The count must be a constant expression.
 - The pool label points at the first field of element 0, so `label.field` on a
   pool is equivalent to `label[0].field`.
+- The pool defines the auto `label.size` (total bytes, `N * <name>.size`) and
+  `label.end` (one past the last byte) symbols.
 - The pool emits a DWARF array type (`DW_TAG_array_type` with
   `DW_TAG_subrange_type`), so the v6vscode debugger shows it as an indexed
   list of expandable structs.

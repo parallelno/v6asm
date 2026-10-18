@@ -30,3 +30,4 @@ inst = 256
 "inst.a" = 256
 "inst.c" = 259
 "inst.end" = 264
+"inst.size" = 8

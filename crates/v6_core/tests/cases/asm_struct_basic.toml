@@ -34,3 +34,4 @@ hero = 256
 "hero.pos_x" = 259
 "hero.pos_y" = 261
 "hero.end" = 263
+"hero.size" = 7

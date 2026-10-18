@@ -23,4 +23,5 @@ min_addr = "0100"
 [expect.symbols]
 sword = 256
 "sword.end" = 270
+"sword.size" = 14
 "item.size" = 14

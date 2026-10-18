@@ -2398,6 +2398,11 @@ impl Assembler {
                 .symbols
                 .define_label_in(&end_name, self.pc.wrapping_add(total), Some(self.obj.active), &file, line_num)?,
         }
+        // Auto `label.size`: total reserved/emitted byte count of the
+        // instance (count * struct size for pools). A plain absolute
+        // constant, like the struct type's own `name.size`.
+        self.symbols
+            .define_constant(&format!("{}.size", scoped), total as i64, &file, line_num)?;
         // Both forms occupy the same space; uninitialized instances are a
         // pure reservation (`.storage`-like), initialized ones emit their
         // bytes in pass 2.
@@ -2430,6 +2435,8 @@ impl Assembler {
                 .symbols
                 .define_label_in(&end_name, self.pc.wrapping_add(total), Some(self.obj.active), &file, line_num)?,
         }
+        self.symbols
+            .define_constant(&format!("{}.size", scoped), total as i64, &file, line_num)?;
         match init {
             None => self.out_reserve(total, None),
             Some(fields) => self.emit_struct_init(struct_name, fields, &file, line_num)?,
@@ -2980,6 +2987,17 @@ impl Assembler {
                                 left: Box::new(Expr::Symbol(label.clone())),
                                 right: Box::new(Expr::Number(total as i64)),
                             },
+                            scope_label: current_global_label.clone(),
+                            file: line.file.clone(),
+                            line_num: line.line_num,
+                        });
+                        // `label.size` is layout-independent, but it is
+                        // defined through the same post-layout pass as
+                        // `label.end` for consistent ordering.
+                        consts.push(PackConst {
+                            name: format!("{}.size", label),
+                            is_local: false,
+                            expr: Expr::Number(total as i64),
                             scope_label: current_global_label.clone(),
                             file: line.file.clone(),
                             line_num: line.line_num,
