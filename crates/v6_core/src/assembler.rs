@@ -397,8 +397,8 @@ impl Assembler {
                     // struct, fall through to the normal parse path.
                     if self.symbols.get_struct(&name).is_none() {
                         return Err(AsmError::new(format!(
-                            "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
-                            name, name
+                            "Undefined macro or struct '{}'. Use '.macro {} (...) .endmacro' or '.struct {} ... .ends' to define it first.",
+                            name, name, name
                         ))
                         .ensure_location(line.diag_file(), line.diag_line()));
                     }
@@ -827,8 +827,8 @@ impl Assembler {
                     // struct, fall through to the normal parse path.
                     if self.symbols.get_struct(&name).is_none() {
                         return Err(AsmError::new(format!(
-                            "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
-                            name, name
+                            "Undefined macro or struct '{}'. Use '.macro {} (...) .endmacro' or '.struct {} ... .ends' to define it first.",
+                            name, name, name
                         ))
                         .ensure_location(line.diag_file(), line.diag_line()));
                     }
