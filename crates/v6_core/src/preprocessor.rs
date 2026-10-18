@@ -54,14 +54,14 @@ impl SourceLine {
 }
 
 /// The kind of source expansion contributing to a line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExpansionKind {
     Macro,
     Loop,
 }
 
 /// The origin of an expansion contributing to a source line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExpansionSite {
     pub kind: ExpansionKind,
     pub name: Option<String>,

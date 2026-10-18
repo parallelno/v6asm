@@ -83,6 +83,36 @@ fn reloc_at(asm: &Assembler, offset: u32) -> &v6_core::object::section::Reloc {
 }
 
 #[test]
+fn nested_macro_body_rows_precede_own_body_rows_in_debug_stream() {
+    // OUTER's body opens with a nested INNER() call: the expansion's first
+    // instruction comes from INNER's body and is emitted under INNER's
+    // context. The DWARF entry-row placement (attribute_rows in
+    // object/dwarf.rs) relies on this ordering.
+    let asm = assemble_obj(
+        ".macro inner\n    nop\n.endmacro\n\
+         .macro outer\n    inner()\n    nop\n.endmacro\n\
+         outer()\n",
+    )
+    .unwrap();
+
+    let rows: Vec<_> = asm
+        .debug_rows
+        .iter()
+        .filter(|row| !row.expansion.is_empty())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    // First instruction of the expansion: the nested body's `nop`, full chain.
+    assert_eq!(rows[0].offset_or_address, 0);
+    assert_eq!(rows[0].expansion.len(), 2);
+    assert_eq!(rows[0].expansion[0].name.as_deref(), Some("outer"));
+    assert_eq!(rows[0].expansion[1].name.as_deref(), Some("inner"));
+    // OUTER's own-body `nop` follows at the next offset, outer chain only.
+    assert_eq!(rows[1].offset_or_address, 1);
+    assert_eq!(rows[1].expansion.len(), 1);
+    assert_eq!(rows[1].expansion[0].name.as_deref(), Some("outer"));
+}
+
+#[test]
 fn debug_rows_track_instructions_but_not_data_directives() {
     let asm = assemble_obj("nop\n.byte 1\nhlt\n").unwrap();
     let instructions: Vec<_> = asm.debug_rows.iter()

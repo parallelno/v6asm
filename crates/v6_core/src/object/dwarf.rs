@@ -117,14 +117,6 @@ struct SiteRef {
     invocation_column: usize,
 }
 
-/// The innermost macro level of an expansion chain.
-fn macro_invocation_site(chain: &[ExpansionSite]) -> Option<&ExpansionSite> {
-    chain
-        .iter()
-        .rev()
-        .find(|site| site.kind == ExpansionKind::Macro)
-}
-
 /// Re-attribute macro-expanded rows to their macro body lines and collect the
 /// contiguous expansion runs used for the inline DIEs.
 ///
@@ -134,10 +126,12 @@ fn macro_invocation_site(chain: &[ExpansionSite]) -> Option<&ExpansionSite> {
 /// - Every row of a macro expansion maps to the macro body line it was
 ///   expanded from (`origin`), so stepping inside an inline frame shows the
 ///   macro definition.
-/// - The first row of an expansion additionally keeps a statement row at the
-///   invocation site, so a breakpoint on the macro call line still resolves.
-///   For a nested call that site is the parent macro's body line, which is
-///   exactly the invocation location recorded in the expansion chain.
+/// - Every macro level of an expansion additionally keeps a statement row at
+///   its own invocation site, emitted at the expansion's first instruction:
+///   the levels enter outermost-first on the chain's first row, so when a body
+///   opens with a nested call the outer entry row lands on the nested
+///   expansion's first instruction and a breakpoint on the outer call line
+///   resolves there instead of skipping past the nested expansion.
 ///
 /// Rows are grouped in emission order: a run continues while rows share the
 /// expansion chain, the section, and contiguous addresses. Loop iterations
@@ -146,11 +140,13 @@ fn macro_invocation_site(chain: &[ExpansionSite]) -> Option<&ExpansionSite> {
 fn attribute_rows(rows: &[DebugLineRow]) -> (Vec<AttributedRow>, Vec<InlineGroup>) {
     let mut attributed: Vec<AttributedRow> = Vec::new();
     let mut groups: Vec<InlineGroup> = Vec::new();
-    let mut entered: HashSet<String> = HashSet::new();
+    // Invocation identities already carrying their entry row, keyed by the
+    // chain prefix up to each macro level (unique per invocation instance).
+    let mut entered: HashSet<Vec<ExpansionSite>> = HashSet::new();
     let mut open_group: Option<usize> = None;
 
     for row in rows {
-        if let Some(context) = &row.macro_context {
+        if row.macro_context.is_some() {
             let chain = &row.expansion;
             if chain.iter().any(|site| site.kind == ExpansionKind::Macro) {
                 let _group_index = match open_group {
@@ -177,29 +173,26 @@ fn attribute_rows(rows: &[DebugLineRow]) -> (Vec<AttributedRow>, Vec<InlineGroup
                     .origin
                     .clone()
                     .unwrap_or_else(|| (row.file.clone(), row.line_num));
-                if entered.insert(context.clone()) {
-                    // Entry row: keep a statement row at the invocation site so
-                    // a breakpoint on the call line resolves to this code. Its
-                    // column is the invocation's own position, not the body
-                    // statement's.
-                    let invocation = macro_invocation_site(chain);
-                    let (invocation_file, invocation_line, invocation_column) = invocation
-                        .map(|site| {
-                            (
-                                site.invocation_file.clone(),
-                                site.invocation_line,
-                                site.invocation_column as u32,
-                            )
-                        })
-                        .unwrap_or_else(|| (row.file.clone(), row.line_num, row.column));
-                    attributed.push(AttributedRow {
-                        section: row.section,
-                        offset_or_address: row.offset_or_address,
-                        file: invocation_file,
-                        line_num: invocation_line,
-                        column: invocation_column,
-                        is_stmt: row.is_stmt,
-                    });
+                // Entry rows: one per macro level of the chain that has not
+                // been entered yet, outermost first, all at this row's
+                // address — the expansion's first instruction. A level whose
+                // body opens with a nested call enters on the nested
+                // expansion's first row, keeping the breakpoint on its call
+                // line at the start of the whole expansion.
+                for (level, site) in chain.iter().enumerate() {
+                    if site.kind != ExpansionKind::Macro {
+                        continue;
+                    }
+                    if entered.insert(chain[..=level].to_vec()) {
+                        attributed.push(AttributedRow {
+                            section: row.section,
+                            offset_or_address: row.offset_or_address,
+                            file: site.invocation_file.clone(),
+                            line_num: site.invocation_line,
+                            column: site.invocation_column as u32,
+                            is_stmt: row.is_stmt,
+                        });
+                    }
                 }
                 attributed.push(AttributedRow {
                     section: row.section,
@@ -1588,6 +1581,57 @@ mod tests {
         let info = &section(&sections, ".debug_info").data;
         assert_eq!(&info[12..16], &0u32.to_le_bytes()); // producer = 0
         assert_eq!(u32::from_le_bytes(info[6..10].try_into().unwrap()), 0); // abbrev_offset
+    }
+
+    #[test]
+    fn attribute_rows_places_entry_rows_at_the_expansions_first_instruction() {
+        // OUTER (defined at macros.asm:10) is invoked at main.asm:7 and its
+        // body opens with a nested INNER() call (macros.asm:12) before any
+        // own-body instruction. The expansion's first instruction is INNER's
+        // body line 3 (offset 0); a breakpoint on main.asm:7 must resolve
+        // there — not to the first post-nested own-body instruction (offset 1).
+        let outer = macro_site_with_column("OUTER", "macros.asm", 10, "main.asm", 7, 1);
+        let inner = macro_site_with_column("INNER", "macros.asm", 2, "macros.asm", 12, 5);
+        let rows = vec![
+            macro_row(
+                Some(0),
+                0,
+                1,
+                "main.asm",
+                7,
+                ("macros.asm", 3),
+                "INNER_2",
+                vec![outer.clone(), inner],
+            ),
+            macro_row(Some(0), 1, 1, "main.asm", 7, ("macros.asm", 13), "OUTER_1", vec![outer]),
+        ];
+
+        let (attributed, groups) = attribute_rows(&rows);
+
+        // Offset 0 carries, in emission order: the OUTER entry row (the call
+        // line), the INNER entry row (the outer body line invoking INNER),
+        // and INNER's body row. Offset 1 keeps only OUTER's own body row —
+        // the OUTER entry row is never repeated.
+        assert_eq!(attributed.len(), 4);
+        assert_eq!(
+            (attributed[0].file.as_str(), attributed[0].line_num, attributed[0].column),
+            ("main.asm", 7, 1)
+        );
+        assert_eq!(attributed[0].offset_or_address, 0);
+        assert_eq!(
+            (attributed[1].file.as_str(), attributed[1].line_num, attributed[1].column),
+            ("macros.asm", 12, 5)
+        );
+        assert_eq!(attributed[1].offset_or_address, 0);
+        assert_eq!((attributed[2].file.as_str(), attributed[2].line_num), ("macros.asm", 3));
+        assert_eq!(attributed[2].offset_or_address, 0);
+        assert_eq!((attributed[3].file.as_str(), attributed[3].line_num), ("macros.asm", 13));
+        assert_eq!(attributed[3].offset_or_address, 1);
+
+        // The nested run and the resumed own-body run stay separate instances.
+        assert_eq!(groups.len(), 2);
+        assert_eq!((groups[0].start, groups[0].end), (0, 1));
+        assert_eq!((groups[1].start, groups[1].end), (1, 2));
     }
 
     #[test]
