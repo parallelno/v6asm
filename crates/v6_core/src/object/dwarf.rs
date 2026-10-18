@@ -1,6 +1,6 @@
 //! Minimal DWARF v4 metadata for relocatable V6C objects and direct-ROM companions.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use crate::assembler::DebugLineRow;
@@ -22,6 +22,41 @@ pub struct DebugConstant {
     pub file: String,
     pub line: usize,
     pub value: i64,
+}
+
+/// A struct definition for DWARF emission (`.struct` ... `.endstruct`).
+#[derive(Debug, Clone)]
+pub struct DebugStructType {
+    pub name: String,
+    pub size: usize,
+    pub members: Vec<DebugMember>,
+    pub file: String,
+    pub line: usize,
+}
+
+/// One member (field) of a `DebugStructType`.
+#[derive(Debug, Clone)]
+pub struct DebugMember {
+    pub name: String,
+    /// Byte offset from the start of the struct.
+    pub offset: usize,
+    /// Member size in bytes (1, 2 or 4); selects the base type DIE.
+    pub size: usize,
+}
+
+/// A struct instance (`count: None`) or typed pool (`count: Some(n)`).
+#[derive(Debug, Clone)]
+pub struct DebugInstance {
+    pub name: String,
+    /// Case-insensitive name of the `DebugStructType` this instance has.
+    pub struct_name: String,
+    pub count: Option<i64>,
+    pub file: String,
+    pub line: usize,
+    /// Section index in object mode; `None` in a direct-ROM companion.
+    pub section: Option<usize>,
+    /// Section-relative offset (object mode) or absolute address (ROM).
+    pub address: u32,
 }
 
 /// A `DebugLineRow` with its line-table attribution resolved.
@@ -220,6 +255,8 @@ const DW_LNE_SET_ADDRESS: u8 = 2;
 pub fn debug_sections(
     rows: &[DebugLineRow],
     constants: &[DebugConstant],
+    structs: &[DebugStructType],
+    instances: &[DebugInstance],
     compilation_dir: &Path,
     relocate: bool,
 ) -> Vec<ExtraSection> {
@@ -287,8 +324,47 @@ pub fn debug_sections(
         .map(|(index, key)| (key.clone(), index))
         .collect();
 
-    let (debug_str, producer_offset, name_offset, comp_dir_offset, constant_name_offsets, macro_name_offsets) =
+    let (mut debug_str, producer_offset, name_offset, comp_dir_offset, constant_name_offsets, macro_name_offsets) =
         debug_strings(&unit_name, &comp_dir, constants, &macro_list);
+    // Struct-related strings (appended after the CU/macro/constant strings).
+    // Nothing is appended when no structs are defined so that `.debug_str`
+    // stays byte-identical for plain assemblies.
+    let struct_strings = if structs.is_empty() {
+        StructDwarfStrings {
+            base_types: Vec::new(),
+            structs: Vec::new(),
+            members: Vec::new(),
+            instances: Vec::new(),
+        }
+    } else {
+        let base_type_name_offsets: Vec<u32> = ["byte", "word", "dword"]
+            .iter()
+            .map(|name| push_string(&mut debug_str, name))
+            .collect();
+        let struct_name_offsets: Vec<u32> = structs
+            .iter()
+            .map(|s| push_string(&mut debug_str, &s.name))
+            .collect();
+        let struct_member_name_offsets: Vec<Vec<u32>> = structs
+            .iter()
+            .map(|s| {
+                s.members
+                    .iter()
+                    .map(|m| push_string(&mut debug_str, &m.name))
+                    .collect()
+            })
+            .collect();
+        let instance_name_offsets: Vec<u32> = instances
+            .iter()
+            .map(|i| push_string(&mut debug_str, &i.name))
+            .collect();
+        StructDwarfStrings {
+            base_types: base_type_name_offsets,
+            structs: struct_name_offsets,
+            members: struct_member_name_offsets,
+            instances: instance_name_offsets,
+        }
+    };
     let abstract_macros: Vec<AbstractMacro> = macro_list
         .iter()
         .zip(&macro_name_offsets)
@@ -336,6 +412,9 @@ pub fn debug_sections(
         &constant_name_offsets,
         &abstract_macros,
         &inline_groups,
+        structs,
+        instances,
+        &struct_strings,
     );
     // The DWARF references below point into *this object's* debug sections.
     // In object mode they are rebased by the linker through relocations
@@ -368,6 +447,8 @@ pub fn debug_sections(
         // Inline DIE `DW_AT_low_pc` fields: section-relative code addresses,
         // rebased by LLD exactly like the line-table row addresses.
         debug_info_relocs.extend(debug_info_output.pc_relocs);
+        // Struct instance `DW_OP_addr` operands: section-relative addresses.
+        debug_info_relocs.extend(debug_info_output.addr_relocs);
     }
 
     vec![
@@ -513,6 +594,66 @@ fn debug_abbrev() -> Vec<u8> {
     write_uleb(&mut data, 0x5a); // DW_AT_call_column
     write_uleb(&mut data, 0x0f); // DW_FORM_udata
     data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 5); // abbreviation code
+    write_uleb(&mut data, 0x24); // DW_TAG_base_type
+    data.push(0); // DW_CHILDREN_no
+    write_uleb(&mut data, 0x03); // DW_AT_name
+    write_uleb(&mut data, 0x0e); // DW_FORM_strp
+    write_uleb(&mut data, 0x0b); // DW_AT_byte_size
+    write_uleb(&mut data, 0x0b); // DW_FORM_data1
+    write_uleb(&mut data, 0x3e); // DW_AT_encoding
+    write_uleb(&mut data, 0x0b); // DW_FORM_data1
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 6); // abbreviation code
+    write_uleb(&mut data, 0x13); // DW_TAG_structure_type
+    data.push(1); // DW_CHILDREN_yes (members)
+    write_uleb(&mut data, 0x03); // DW_AT_name
+    write_uleb(&mut data, 0x0e); // DW_FORM_strp
+    write_uleb(&mut data, 0x0b); // DW_AT_byte_size
+    write_uleb(&mut data, 0x05); // DW_FORM_data2
+    write_uleb(&mut data, 0x3a); // DW_AT_decl_file
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    write_uleb(&mut data, 0x3b); // DW_AT_decl_line
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 7); // abbreviation code
+    write_uleb(&mut data, 0x0d); // DW_TAG_member
+    data.push(0); // DW_CHILDREN_no
+    write_uleb(&mut data, 0x03); // DW_AT_name
+    write_uleb(&mut data, 0x0e); // DW_FORM_strp
+    write_uleb(&mut data, 0x38); // DW_AT_data_member_location
+    write_uleb(&mut data, 0x05); // DW_FORM_data2
+    write_uleb(&mut data, 0x49); // DW_AT_type
+    write_uleb(&mut data, 0x06); // DW_FORM_ref4
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 8); // abbreviation code
+    write_uleb(&mut data, 0x34); // DW_TAG_variable
+    data.push(0); // DW_CHILDREN_no
+    write_uleb(&mut data, 0x03); // DW_AT_name
+    write_uleb(&mut data, 0x0e); // DW_FORM_strp
+    write_uleb(&mut data, 0x3a); // DW_AT_decl_file
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    write_uleb(&mut data, 0x3b); // DW_AT_decl_line
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    write_uleb(&mut data, 0x49); // DW_AT_type
+    write_uleb(&mut data, 0x06); // DW_FORM_ref4
+    write_uleb(&mut data, 0x02); // DW_AT_location
+    write_uleb(&mut data, 0x18); // DW_FORM_exprloc
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 9); // abbreviation code
+    write_uleb(&mut data, 0x01); // DW_TAG_array_type
+    data.push(1); // DW_CHILDREN_yes (subrange)
+    write_uleb(&mut data, 0x49); // DW_AT_type
+    write_uleb(&mut data, 0x06); // DW_FORM_ref4
+    write_uleb(&mut data, 0x0b); // DW_AT_byte_size
+    write_uleb(&mut data, 0x05); // DW_FORM_data2
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
+    write_uleb(&mut data, 10); // abbreviation code
+    write_uleb(&mut data, 0x21); // DW_TAG_subrange_type
+    data.push(0); // DW_CHILDREN_no
+    write_uleb(&mut data, 0x37); // DW_AT_count
+    write_uleb(&mut data, 0x0f); // DW_FORM_udata
+    data.extend_from_slice(&[0, 0]); // attribute/form terminator
     data.push(0); // abbreviation table terminator
     data
 }
@@ -524,6 +665,18 @@ struct CuStrings {
     comp_dir: u32,
 }
 
+/// String offsets for the struct-related DIE names inside `.debug_str`.
+struct StructDwarfStrings {
+    /// `byte`, `word`, `dword` base type names.
+    base_types: Vec<u32>,
+    /// Per-struct name offsets, indexed like the `structs` slice.
+    structs: Vec<u32>,
+    /// Per-struct member name offsets.
+    members: Vec<Vec<u32>>,
+    /// Per-instance name offsets, indexed like the `instances` slice.
+    instances: Vec<u32>,
+}
+
 /// The `.debug_info` byte stream plus the fields that need relocations.
 struct DebugInfoOutput {
     data: Vec<u8>,
@@ -533,6 +686,8 @@ struct DebugInfoOutput {
     stmt_list_field: u32,
     /// Relocations for inline DIE `DW_AT_low_pc` fields.
     pc_relocs: Vec<Reloc>,
+    /// Relocations for struct instance `DW_OP_addr` operands.
+    addr_relocs: Vec<Reloc>,
 }
 
 fn debug_info(
@@ -542,6 +697,9 @@ fn debug_info(
     constant_name_offsets: &[u32],
     abstract_macros: &[AbstractMacro],
     inline_groups: &[InlineGroupInfo],
+    structs: &[DebugStructType],
+    instances: &[DebugInstance],
+    struct_strings: &StructDwarfStrings,
 ) -> DebugInfoOutput {
     let mut data = vec![0; 4];
     data.extend_from_slice(&4u16.to_le_bytes());
@@ -565,6 +723,88 @@ fn debug_info(
         write_uleb(&mut data, file_indices[&constant.file] as u64);
         write_uleb(&mut data, constant.line as u64);
         write_sleb(&mut data, constant.value);
+    }
+
+    // Struct DIEs: base types first (their CU-relative offsets are referenced
+    // by members), then one structure type DIE per struct with member
+    // children, then one typed variable per instance and one array type +
+    // typed variable per pool. Nothing is emitted when no structs are defined,
+    // so plain-assembly `.debug_info` streams stay byte-identical.
+    let mut addr_relocs = Vec::new();
+    if !structs.is_empty() {
+        let mut base_type_offsets: HashMap<usize, u32> = HashMap::new();
+        for (index, size) in [1usize, 2, 4].into_iter().enumerate() {
+            base_type_offsets.insert(size, {
+                let offset = data.len() as u32;
+                write_uleb(&mut data, 5);
+                strp_fields.push((data.len() as u32, struct_strings.base_types[index]));
+                data.extend_from_slice(&struct_strings.base_types[index].to_le_bytes());
+                data.push(size as u8);
+                data.push(0x07); // DW_ATE_unsigned
+                offset
+            });
+        }
+
+        let mut struct_die_offsets: HashMap<String, u32> = HashMap::new();
+        for (index, def) in structs.iter().enumerate() {
+            struct_die_offsets.insert(def.name.to_uppercase(), data.len() as u32);
+            write_uleb(&mut data, 6);
+            strp_fields.push((data.len() as u32, struct_strings.structs[index]));
+            data.extend_from_slice(&struct_strings.structs[index].to_le_bytes());
+            data.extend_from_slice(&(def.size as u16).to_le_bytes());
+            write_uleb(&mut data, file_indices.get(&def.file).copied().unwrap_or(0) as u64);
+            write_uleb(&mut data, def.line as u64);
+            for (member, name_offset) in def.members.iter().zip(&struct_strings.members[index]) {
+                write_uleb(&mut data, 7);
+                strp_fields.push((data.len() as u32, *name_offset));
+                data.extend_from_slice(&name_offset.to_le_bytes());
+                data.extend_from_slice(&(member.offset as u16).to_le_bytes());
+                let type_offset: u32 = base_type_offsets.get(&member.size).copied().unwrap_or(base_type_offsets[&1]);
+                data.extend_from_slice(&type_offset.to_le_bytes());
+            }
+            data.push(0); // End of member children.
+        }
+
+        for (index, inst) in instances.iter().enumerate() {
+            let Some(type_offset) = struct_die_offsets.get(&inst.struct_name).copied() else {
+                continue;
+            };
+            // Pools get an array type DIE wrapping the struct element type.
+            let var_type_offset = if let Some(count) = inst.count {
+                let array_offset = data.len() as u32;
+                write_uleb(&mut data, 9);
+                data.extend_from_slice(&type_offset.to_le_bytes());
+                data.extend_from_slice(&((count as usize * instances_element_size(structs, &inst.struct_name)) as u16).to_le_bytes());
+                write_uleb(&mut data, 10);
+                write_uleb(&mut data, count as u64);
+                data.push(0); // End of subrange children.
+                array_offset
+            } else {
+                type_offset
+            };
+            write_uleb(&mut data, 8);
+            strp_fields.push((data.len() as u32, struct_strings.instances[index]));
+            data.extend_from_slice(&struct_strings.instances[index].to_le_bytes());
+            write_uleb(&mut data, file_indices.get(&inst.file).copied().unwrap_or(0) as u64);
+            write_uleb(&mut data, inst.line as u64);
+            data.extend_from_slice(&var_type_offset.to_le_bytes());
+            // DW_AT_location: exprloc with DW_OP_addr <u16 address>.
+            let location_len = 3usize; // DW_OP_addr + 2 address bytes
+            write_uleb(&mut data, location_len as u64);
+            data.push(0x03); // DW_OP_addr
+            let addr_field = data.len() as u32;
+            data.extend_from_slice(
+                &(inst.section.map_or(inst.address as u16, |_| 0)).to_le_bytes(),
+            );
+            if let Some(section) = inst.section {
+                addr_relocs.push(Reloc {
+                    offset: addr_field,
+                    kind: RelocKind::Abs16,
+                    target: RelocTarget::Section(section),
+                    addend: inst.address as i64,
+                });
+            }
+        }
     }
 
     // Abstract `DW_TAG_subprogram` DIEs, one per invoked macro definition.
@@ -619,7 +859,16 @@ fn debug_info(
         strp_fields,
         stmt_list_field,
         pc_relocs,
+        addr_relocs,
     }
+}
+
+/// Byte size of a struct's single element, for pool array `DW_AT_byte_size`.
+fn instances_element_size(structs: &[DebugStructType], struct_name: &str) -> usize {
+    structs
+        .iter()
+        .find(|s| s.name.to_uppercase() == struct_name)
+        .map_or(0, |s| s.size)
 }
 
 fn debug_line(
@@ -1102,7 +1351,7 @@ mod tests {
             "A_1",
             chain,
         )];
-        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), false);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), false);
         let abbrev = &section(&sections, ".debug_abbrev").data;
         let info = &section(&sections, ".debug_info").data;
 
@@ -1179,9 +1428,9 @@ mod tests {
             row(Some(1), 2, "src/main.asm", 9, 6),
             row(Some(0), 1, "lib/util.asm", 4, 0),
         ];
-        let sections = debug_sections(&rows, &[], Path::new("C:\\project"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:\\project"), true);
         let reversed_rows: Vec<DebugLineRow> = rows.into_iter().rev().collect();
-        let reversed = debug_sections(&reversed_rows, &[], Path::new("C:\\project"), true);
+        let reversed = debug_sections(&reversed_rows, &[], &[], &[], Path::new("C:\\project"), true);
 
         assert_eq!(sections.len(), 4);
         assert_eq!(
@@ -1217,6 +1466,8 @@ mod tests {
         let sections = debug_sections(
             &[row(None, 0x1234, "game.asm", 3, 7)],
             &[],
+            &[],
+            &[],
             Path::new("."),
             false,
         );
@@ -1235,7 +1486,7 @@ mod tests {
             line: 12,
             value: 0x4000,
         }];
-        let sections = debug_sections(&[], &constants, Path::new("."), true);
+        let sections = debug_sections(&[], &constants, &[], &[], Path::new("."), true);
 
         assert!(section(&sections, ".debug_str").data.windows(b"ARRAY_ADDR\0".len())
             .any(|window| window == b"ARRAY_ADDR\0"));
@@ -1274,7 +1525,7 @@ mod tests {
                 value: 2,
             },
         ];
-        let sections = debug_sections(&[], &constants, Path::new("C:/proj"), true);
+        let sections = debug_sections(&[], &constants, &[], &[], Path::new("C:/proj"), true);
         let str_data = &section(&sections, ".debug_str").data;
         let info = section(&sections, ".debug_info");
         assert_eq!(info.relocs.len(), 3 /* CU strp */ + 2 /* constant strp */ + 1 /* stmt_list */ + 1 /* abbrev_offset */);
@@ -1331,7 +1582,7 @@ mod tests {
             line: 1,
             value: 1,
         }];
-        let sections = debug_sections(&[], &constants, Path::new("C:/proj"), false);
+        let sections = debug_sections(&[], &constants, &[], &[], Path::new("C:/proj"), false);
         assert!(section(&sections, ".debug_info").relocs.is_empty());
         // Raw offsets stay baked in (single-CU companions need no rebasing).
         let info = &section(&sections, ".debug_info").data;
@@ -1406,7 +1657,7 @@ mod tests {
             macro_row(Some(0), 2, 1, "main.asm", 42, ("engine/macros.asm", 305), "PAUSE_1", chain),
         ];
 
-        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), true);
         let line = section(&sections, ".debug_line");
         let (files, line_rows) = line_table(&line.data);
 
@@ -1444,7 +1695,7 @@ mod tests {
             chain,
         )];
 
-        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), true);
         let info = section(&sections, ".debug_info");
         let dies = parse_dies(&info.data, &section(&sections, ".debug_abbrev").data);
         let str_data = &section(&sections, ".debug_str").data;
@@ -1493,7 +1744,7 @@ mod tests {
             vec![outer, inner],
         )];
 
-        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), true);
         let dies = parse_dies(
             &section(&sections, ".debug_info").data,
             &section(&sections, ".debug_abbrev").data,
@@ -1564,7 +1815,7 @@ mod tests {
             chain,
         )];
 
-        let sections = debug_sections(&rows, &[], Path::new("C:/proj"), false);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), false);
         let info = section(&sections, ".debug_info");
         assert!(info.relocs.is_empty());
         let dies = parse_dies(&info.data, &section(&sections, ".debug_abbrev").data);

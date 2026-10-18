@@ -1,0 +1,36 @@
+# Basic struct definition, generated offset constants, instance reservation,
+# `label.field` references and the auto `label.end` symbol.
+
+[files]
+"main.asm" = '''
+.org $0100
+.struct actor
+update_ptr: word
+status:     byte
+pos_x:      word
+pos_y:      word
+.endstruct
+
+hero: actor
+    ; pointer-based field access via the generated offset constant
+    lxi h, actor.pos_x
+    ; absolute field address of the instance
+    lxi h, hero.pos_y
+'''
+
+[expect]
+rom = "21 03 00 21 05 01"
+min_addr = "0107"
+
+[expect.symbols]
+"actor.update_ptr" = 0
+"actor.status" = 2
+"actor.pos_x" = 3
+"actor.pos_y" = 5
+"actor.size" = 7
+hero = 256
+"hero.update_ptr" = 256
+"hero.status" = 258
+"hero.pos_x" = 259
+"hero.pos_y" = 261
+"hero.end" = 263

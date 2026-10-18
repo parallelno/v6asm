@@ -142,6 +142,9 @@ Expressions can reference:
 - Labels (e.g., `StartAddr`, `Loop`)
 - Constants defined with `=` or `EQU` (e.g., `MAX_VALUE`)
 - Local labels prefixed with `@` (e.g., `@loop`)
+- Dotted struct field references (e.g., `hero.pos_x`, `char_pool[2].health`),
+  which resolve to the field's absolute address inside the instance. See
+  [Structs](structs.md) for details.
 - Boolean literals `TRUE` (1) and `FALSE` (0)
 - Location counter `*`, which resolves to the current address for any expression (constants, data, immediates, directives). Example:
 

@@ -1,0 +1,16 @@
+# Duplicate field names (including through `extends`) are errors, and `size`
+# is a reserved field name.
+
+[files]
+"main.asm" = '''
+.struct base
+a: byte
+.ends
+
+.struct child extends base
+a: byte
+.ends
+'''
+
+[expect]
+error_contains = "Duplicate field"

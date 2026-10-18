@@ -1,0 +1,14 @@
+# Pool indices are range-checked against the declared count.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+.ends
+
+pool: item[2]
+X = pool[2].a
+'''
+
+[expect]
+error_contains = "out of range"

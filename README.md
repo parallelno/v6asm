@@ -45,6 +45,7 @@ Full reference is in the [`docs/`](docs/README.md) folder:
 - [CLI Usage](docs/cli.md) — arguments, options, output artifacts
 - [Assembler Syntax](docs/syntax.md) — expressions, operators, literals, symbols
 - [Directives](docs/directives.md) — `.org`, `.include`, `.if`, `.loop`, `.optional`, data emission, and more
+- [Structs](docs/structs.md) — user-defined composite data types, inheritance, pools, and references
 - [Macros](docs/macros.md) — `.macro` / `.endmacro`, parameters, scoping
 - [Listing Format](docs/listing.md) — `.lst` column layout and expansion behavior
 - [Object Output](docs/object-output.md) — relocatable ELF objects, sections, symbols, relocations

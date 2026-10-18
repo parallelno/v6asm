@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::assembler::{Assembler, DebugLineRow, EmissionKind, ListingLine};
 use crate::diagnostics::{AsmError, AsmResult};
-use crate::object::dwarf::DebugConstant;
+use crate::object::dwarf::{DebugConstant, DebugInstance, DebugMember, DebugStructType};
 use crate::object::elf::{self, ObjSymbol, SymBinding, SymLocation, SymType};
 use crate::object::section::RelocTarget;
 
@@ -82,11 +82,14 @@ pub fn generate_debug_companion(asm: &Assembler, config: &RomConfig) -> Vec<u8> 
         });
     }
     let constants = debug_constants(asm);
+    let (structs, instances) = debug_struct_types(asm);
     // Direct-ROM debug companions hold a single compilation unit whose raw
     // DWARF section-relative offsets are already final, so no relocations.
     let debug_sections = crate::object::dwarf::debug_sections(
         &asm.debug_rows,
         &constants,
+        &structs,
+        &instances,
         asm.project_dir(),
         false,
     );
@@ -201,11 +204,12 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
     }
 
     let constants = debug_constants(asm);
+    let (structs, instances) = debug_struct_types(asm);
     let debug_sections = config.debug
         .then(|| {
             // Object mode: emit relocations so ld.lld rebases the DWARF
             // section-relative references of each CU when concatenating.
-            crate::object::dwarf::debug_sections(&asm.debug_rows, &constants, asm.project_dir(), true)
+            crate::object::dwarf::debug_sections(&asm.debug_rows, &constants, &structs, &instances, asm.project_dir(), true)
         })
         .unwrap_or_default();
     Ok(elf::serialize_with_extra(sections, &symbols, &debug_sections))
@@ -236,6 +240,56 @@ fn debug_constants(asm: &Assembler) -> Vec<DebugConstant> {
         .collect();
     constants.sort_by(|left, right| left.name.cmp(&right.name));
     constants
+}
+
+/// Collect struct definitions and struct instances/pools for DWARF emission.
+/// Generated `name.<field>` / `name.size` constants are filtered out of the
+/// constant DIE list by their dotted names; instances defined inside macro
+/// expansions are skipped like other macro-scoped symbols.
+fn debug_struct_types(asm: &Assembler) -> (Vec<DebugStructType>, Vec<DebugInstance>) {
+    let mut structs: Vec<_> = asm
+        .symbols
+        .all_structs()
+        .map(|def| DebugStructType {
+            name: def.name.clone(),
+            size: def.size,
+            members: def
+                .fields
+                .iter()
+                .map(|field| DebugMember {
+                    name: field.name.clone(),
+                    offset: field.offset,
+                    size: field.kind.size(),
+                })
+                .collect(),
+            file: def.file.clone(),
+            line: def.line,
+        })
+        .collect();
+    structs.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut instances: Vec<_> = asm
+        .symbols
+        .all_instances()
+        .filter_map(|(key, meta)| {
+            let info = asm.symbols.get_global_info(key)?;
+            if is_macro_scoped_name(&info.original_name) {
+                return None;
+            }
+            Some(DebugInstance {
+                name: info.original_name.clone(),
+                struct_name: meta.struct_name.clone(),
+                count: meta.count,
+                file: meta.file.clone(),
+                line: meta.line,
+                section: info.section,
+                address: info.value.unwrap_or(0) as u32,
+            })
+        })
+        .collect();
+    instances.sort_by(|left, right| left.name.cmp(&right.name));
+
+    (structs, instances)
 }
 
 fn debug_symbol_kind_and_size(

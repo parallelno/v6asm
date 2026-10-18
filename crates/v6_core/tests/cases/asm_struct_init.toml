@@ -1,0 +1,26 @@
+# Named-form initialization: bytes are emitted, unnamed fields are 0, and
+# all six type spellings work in field declarations.
+
+[files]
+"main.asm" = '''
+.org $0100
+.struct item
+kind:   byte
+x:      word
+hp:     db
+w:      dw
+big:    dword
+qty:    dd
+.ends
+
+sword: item(kind=3, x=$1234, hp=7, big=$AABBCCDD)
+'''
+
+[expect]
+rom = "03 34 12 07 00 00 DD CC BB AA 00 00 00 00"
+min_addr = "0100"
+
+[expect.symbols]
+sword = 256
+"sword.end" = 270
+"item.size" = 14

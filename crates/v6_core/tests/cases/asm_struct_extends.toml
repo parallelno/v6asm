@@ -1,0 +1,32 @@
+# `extends` inheritance: parent fields come first at their original offsets and
+# keep their names under the child struct.
+
+[files]
+"main.asm" = '''
+.org $0100
+.struct base
+a: byte
+b: word
+.ends
+
+.struct child extends base
+c: byte
+d: dword
+.ends
+
+inst: child
+'''
+
+[expect]
+
+[expect.symbols]
+"base.size" = 3
+"child.a" = 0
+"child.b" = 1
+"child.c" = 3
+"child.d" = 4
+"child.size" = 8
+inst = 256
+"inst.a" = 256
+"inst.c" = 259
+"inst.end" = 264

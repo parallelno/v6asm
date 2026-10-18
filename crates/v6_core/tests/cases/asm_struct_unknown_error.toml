@@ -1,0 +1,13 @@
+# References to unknown structs and unknown fields produce diagnostics.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+.ends
+
+x: nosuch
+'''
+
+[expect]
+error_contains = "Unknown struct"

@@ -408,6 +408,44 @@ knows the post-GC global arena and its final gaps.
 Gaps are numbered by ascending arena offset. Names beginning with `__PACK_`
 are reserved for assembler-generated pack analysis constants.
 
+## `.struct` / `.ends`
+
+Defines a user-defined composite data type (struct). Structs can be expanded
+(instantiated), referenced field-by-field with global labels, and inherited
+(`extends`). See [Structs](structs.md) for the full specification.
+
+```asm
+.struct actor
+update_ptr:   word
+status:       byte
+pos_x:        word
+pos_y:        word
+.ends
+```
+
+A `.struct` block only declares the layout — it emits no bytes. Instances are
+created by declaring a label with the struct name:
+
+```asm
+hero: actor                        ; uninitialized instance
+shield: actor(pos_x = 5, pos_y = 10) ; named initializer form (the only
+                                   ; supported form; positional lists are
+                                   ; rejected)
+char_pool: actor[12]               ; pool of 12 uninitialized instances
+```
+
+Field references resolve to the field's absolute address inside the instance
+and can be used everywhere a global label can:
+
+```asm
+lxi h, hero.pos_x           ; address of hero's pos_x field
+lxi h, char_pool[2].status  ; constant-indexed pool reference
+```
+
+Every struct definition generates `<name>.<field>` offset constants and a
+`<name>.size` constant; every instance and pool generates a `<label>.end`
+symbol.
+
 ## Data Emission
 
 ### `.byte` / `DB`

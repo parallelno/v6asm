@@ -1,0 +1,15 @@
+# Initialized instances are not allowed inside `.pack` blocks.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+.ends
+
+.pack
+bad: item(a=1)
+.endpack
+'''
+
+[expect]
+error_contains = "not allowed inside a .pack"

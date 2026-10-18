@@ -123,6 +123,28 @@ Scoped `@` labels and macro-generated names are intentionally omitted from the
 debugger-facing named-symbol set because their source spelling is not unique.
 Use the DWARF line table to locate generated instructions instead.
 
+## Struct Types
+
+`.struct` definitions and their instances are emitted into `.debug_info` when
+debug output is enabled. See [Structs](structs.md) for the assembler syntax.
+
+- Each struct definition produces one `DW_TAG_structure_type` DIE (name and
+  byte size) with one `DW_TAG_member` child per field. Members reference
+  `byte`/`word`/`dword` base types and record their byte offset with
+  `DW_AT_data_member_location`.
+- Each struct instance produces one `DW_TAG_variable` DIE with its struct type
+  and address.
+- A pool (`label: name[N]`) produces a `DW_TAG_variable` with a
+  `DW_TAG_array_type` whose element is the struct type and whose
+  `DW_TAG_subrange_type` records the element count.
+- Generated offset constants (`name.<field>`, `name.size`) are recorded like
+  other immutable absolute constants.
+
+These DIE shapes match what `v6clang` emits for C structs, so the v6vscode
+debugger renders them identically: struct instances appear as expandable
+structures in the Variables pane (members by name, values read live at
+`base + member.offset`), and pools appear as indexed element lists.
+
 ## Current Limits
 
 - Metadata is DWARF v4 and uses the V6C 16-bit address model.

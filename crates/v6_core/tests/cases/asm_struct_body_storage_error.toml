@@ -1,0 +1,13 @@
+# Only field declarations are allowed inside a struct body: `.storage` and
+# other byte-emitting or reserving directives are rejected.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+    .storage 4
+.ends
+'''
+
+[expect]
+error_contains = "not allowed inside a struct body"

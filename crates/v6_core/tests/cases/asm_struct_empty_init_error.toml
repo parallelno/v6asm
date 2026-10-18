@@ -1,0 +1,13 @@
+# `label: name()` — the empty initializer list is an error.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+.ends
+
+x: item()
+'''
+
+[expect]
+error_contains = "Empty initializer list"

@@ -13,6 +13,8 @@ pub enum Token {
     Colon,
     OpenParen,
     CloseParen,
+    OpenBracket,
+    CloseBracket,
     Dot,
     At,
     Newline,
@@ -187,6 +189,16 @@ pub fn tokenize_line(line: &str, file: &str, line_num: usize) -> AsmResult<Vec<L
             }
             ')' => {
                 tokens.push(LocatedToken::new(Token::CloseParen, file, line_num, col));
+                i += 1;
+                continue;
+            }
+            '[' => {
+                tokens.push(LocatedToken::new(Token::OpenBracket, file, line_num, col));
+                i += 1;
+                continue;
+            }
+            ']' => {
+                tokens.push(LocatedToken::new(Token::CloseBracket, file, line_num, col));
                 i += 1;
                 continue;
             }

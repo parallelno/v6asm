@@ -1,0 +1,31 @@
+# Typed pools (`label: name[N]`), constant-index references with expressions,
+# pool base ≡ element 0, and the auto `label.end` covering the whole pool.
+
+[files]
+"main.asm" = '''
+.org $0100
+.struct mob
+state:  byte
+x:      word
+y:      word
+.ends
+
+SLOT_B = 1
+
+pool: mob[3]
+E2_X    = pool[2].x
+B_STATE = pool[SLOT_B].state
+E0_Y    = pool[0].y
+BASE_Y  = pool.y
+'''
+
+[expect]
+
+[expect.symbols]
+pool = 256
+"pool.end" = 271
+"mob.size" = 5
+E2_X = 267
+B_STATE = 261
+E0_Y = 259
+BASE_Y = 259

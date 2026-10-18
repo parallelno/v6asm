@@ -1,0 +1,14 @@
+# The auto-generated `label.end` and `name.size` symbols cannot be redefined
+# by the user, and a struct name cannot collide with a label/constant.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+.ends
+
+item: item
+'''
+
+[expect]
+error_contains = "collides"

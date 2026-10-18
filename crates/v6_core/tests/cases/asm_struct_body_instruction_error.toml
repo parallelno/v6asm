@@ -1,0 +1,13 @@
+# Only field declarations and the whitelisted preprocessor directives are
+# allowed inside a struct body: instructions are rejected.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+    nop
+.ends
+'''
+
+[expect]
+error_contains = "not allowed inside a struct body"

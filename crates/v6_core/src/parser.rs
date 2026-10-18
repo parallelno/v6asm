@@ -1,10 +1,11 @@
-use crate::diagnostics::{AsmError, AsmResult};
+use crate::diagnostics::{AsmError, AsmResult, SourceLocation};
 use crate::expr::{Expr, ExprParser};
 use crate::instructions::{
-    Condition, ParsedOperand, Register, RegisterPair,
+    encode_instruction, Condition, ParsedOperand, Register, RegisterPair,
 };
 use crate::lexer::{LocatedToken, Token};
 use crate::project::CpuMode;
+use crate::symbols::StructFieldType;
 
 /// A parsed assembly line
 #[derive(Debug)]
@@ -13,8 +14,20 @@ pub enum ParsedLine {
     Empty,
     /// Label definition (global)
     Label(String),
-    /// Local label definition (@name)
+    /// A local label definition (@name)
     LocalLabel(String),
+    /// A struct field type keyword inside a `.struct` body, following the
+    /// field-name label on the same line (`name: byte`).
+    FieldDecl(StructFieldType),
+    /// A struct instance declaration in statement position:
+    /// `label: name`, `label: name(f1=v1, ...)` or `label: name[N]`.
+    StructInstance {
+        struct_name: String,
+        /// Pool element count for the `name[N]` form.
+        count: Option<Expr>,
+        /// Named initializer list for the `name(f=v, ...)` form.
+        init: Option<Vec<(String, Expr)>>,
+    },
     /// An instruction with mnemonic and operands
     Instruction {
         mnemonic: String,
@@ -66,6 +79,10 @@ pub enum Directive {
     Pack(PackKind),
     /// Close a `.pack` block.
     EndPack,
+    /// Open a `.struct` definition block.
+    StructDef { name: String, extends: Option<String> },
+    /// Close a `.struct` block (`.endstruct` / `.ends`).
+    EndStruct,
     Setting(Vec<(String, String)>),
     Align(Expr),
     Storage { length: Expr, filler: Option<Expr> },
@@ -232,6 +249,123 @@ pub fn parse_line(tokens: &[LocatedToken], cpu_mode: CpuMode) -> AsmResult<Vec<P
         }
     }
 
+    // Struct forms: a bare identifier statement that is not a zero-operand
+    // instruction. Inside a `.struct` body this is a field type keyword
+    // (`name: byte`); outside it is a struct instance reference:
+    //   `label: name`                — uninitialized instance
+    //   `label: name(f1=v1, ...)`    — named-form initialization
+    //   `label: name[N]`             — pool of N instances
+    if !parsed_statement && pos < tokens.len() {
+        if let Some(Token::Identifier(name)) = tokens.get(pos).map(|t| &t.value) {
+            let name = name.clone();
+            let next = tokens.get(pos + 1).map(|t| &t.value);
+            if matches!(next, None) {
+                if let Some(kind) = StructFieldType::from_name(&name) {
+                    pos += 1;
+                    results.push(ParsedLine::FieldDecl(kind));
+                    parsed_statement = true;
+                } else if encode_instruction(&name, &[], cpu_mode).is_err() {
+                    // Not a zero-operand instruction — struct instance
+                    // reference (validated by the assembler).
+                    pos += 1;
+                    results.push(ParsedLine::StructInstance {
+                        struct_name: name,
+                        count: None,
+                        init: None,
+                    });
+                    parsed_statement = true;
+                }
+            } else if matches!(next, Some(Token::OpenBracket)) {
+                // `name[expr]` — pool declaration.
+                pos += 2;
+                let (expr, consumed) = parse_expr_from(tokens, pos)?;
+                pos += consumed;
+                if !matches!(tokens.get(pos).map(|t| &t.value), Some(Token::CloseBracket)) {
+                    let loc = tokens.get(pos).map(|t| t.loc.clone()).unwrap_or(SourceLocation {
+                        file: String::new(),
+                        line: 0,
+                        col: 0,
+                    });
+                    return Err(AsmError::new("Expected ']' after struct pool count")
+                        .with_location(loc));
+                }
+                pos += 1;
+                results.push(ParsedLine::StructInstance {
+                    struct_name: name,
+                    count: Some(expr),
+                    init: None,
+                });
+                parsed_statement = true;
+            } else if matches!(next, Some(Token::OpenParen))
+                && looks_like_named_init(tokens, pos + 2)
+            {
+                // `name(f1=v1, f2=v2, ...)` — named-form initializer.
+                pos += 2; // skip the struct name and '('
+                let mut fields: Vec<(String, Expr)> = Vec::new();
+                if !matches!(tokens.get(pos).map(|t| &t.value), Some(Token::CloseParen)) {
+                    loop {
+                        let fname = match tokens.get(pos).map(|t| &t.value) {
+                            Some(Token::Identifier(f)) => f.clone(),
+                            _ => {
+                                let loc = tokens.get(pos).map(|t| t.loc.clone()).unwrap_or(SourceLocation {
+                                    file: String::new(),
+                                    line: 0,
+                                    col: 0,
+                                });
+                                return Err(AsmError::new(
+                                    "Expected a field name in the struct initializer list",
+                                )
+                                .with_location(loc));
+                            }
+                        };
+                        pos += 1;
+                        match tokens.get(pos).map(|t| &t.value) {
+                            Some(Token::Operator(s)) if s == "=" => {
+                                pos += 1;
+                            }
+                            _ => {
+                                let loc = tokens.get(pos).map(|t| t.loc.clone()).unwrap_or(SourceLocation {
+                                    file: String::new(),
+                                    line: 0,
+                                    col: 0,
+                                });
+                                return Err(AsmError::new(format!(
+                                    "Expected '=' after initializer field '{}' (only the named form is supported)",
+                                    fname
+                                ))
+                                .with_location(loc));
+                            }
+                        }
+                        let (expr, consumed) = parse_expr_from(tokens, pos)?;
+                        pos += consumed;
+                        fields.push((fname, expr));
+                        if matches!(tokens.get(pos).map(|t| &t.value), Some(Token::Comma)) {
+                            pos += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                if !matches!(tokens.get(pos).map(|t| &t.value), Some(Token::CloseParen)) {
+                    let loc = tokens.get(pos).map(|t| t.loc.clone()).unwrap_or(SourceLocation {
+                        file: String::new(),
+                        line: 0,
+                        col: 0,
+                    });
+                    return Err(AsmError::new("Expected ')' after the struct initializer list")
+                        .with_location(loc));
+                }
+                pos += 1;
+                results.push(ParsedLine::StructInstance {
+                    struct_name: name,
+                    count: None,
+                    init: Some(fields),
+                });
+                parsed_statement = true;
+            }
+        }
+    }
+
     // Must be an instruction or macro invocation
     if !parsed_statement && pos < tokens.len() {
         let parsed_instr = parse_instruction(tokens, &mut pos, cpu_mode)?;
@@ -253,6 +387,63 @@ pub fn parse_line(tokens: &[LocatedToken], cpu_mode: CpuMode) -> AsmResult<Vec<P
         Ok(vec![ParsedLine::Empty])
     } else {
         Ok(results)
+    }
+}
+
+/// Heuristic: does the token sequence starting at `pos` (just after the
+/// opening parenthesis of a statement-initial identifier) look like a named
+/// initializer list `f1 = e1, f2 = e2, ...` rather than an instruction operand
+/// list? Used to distinguish `label: name(health=5)` from instructions with
+/// parenthesized operands such as `out (c)`. The empty list (`name()`) is
+/// accepted here so the assembler can report the dedicated error message.
+fn looks_like_named_init(tokens: &[LocatedToken], pos: usize) -> bool {
+    let mut i = pos;
+    if matches!(tokens.get(i).map(|t| &t.value), Some(Token::CloseParen)) {
+        return true;
+    }
+    loop {
+        match tokens.get(i).map(|t| &t.value) {
+            Some(Token::Identifier(_)) => {}
+            _ => return false,
+        }
+        match tokens.get(i + 1).map(|t| &t.value) {
+            Some(Token::Operator(s)) if s == "=" => {}
+            _ => return false,
+        }
+        // Scan the value expression until a top-level comma or the closing
+        // parenthesis. Nested brackets/parens are tracked by depth.
+        i += 2;
+        let mut depth = 0usize;
+        loop {
+            match tokens.get(i).map(|t| &t.value) {
+                None => return false,
+                Some(Token::OpenParen) | Some(Token::OpenBracket) => {
+                    depth += 1;
+                    i += 1;
+                }
+                Some(Token::CloseParen) => {
+                    if depth == 0 {
+                        return true;
+                    }
+                    depth -= 1;
+                    i += 1;
+                }
+                Some(Token::CloseBracket) => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    i += 1;
+                }
+                Some(Token::Comma) if depth == 0 => {
+                    i += 1;
+                    break;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
     }
 }
 
@@ -408,6 +599,35 @@ fn parse_directive(name: &str, tokens: &[LocatedToken], pos: &mut usize) -> AsmR
             Ok(Directive::Pack(kind))
         }
         "ENDPACK" => Ok(Directive::EndPack),
+        "STRUCT" => {
+            let sname = match tokens.get(*pos).map(|t| &t.value) {
+                Some(Token::Identifier(n)) => {
+                    let n = n.clone();
+                    *pos += 1;
+                    n
+                }
+                _ => return Err(AsmError::new("Expected struct name after .struct")),
+            };
+            let mut extends = None;
+            if let Some(Token::Identifier(kw)) = tokens.get(*pos).map(|t| &t.value) {
+                if kw.to_uppercase() == "EXTENDS" {
+                    *pos += 1;
+                    match tokens.get(*pos).map(|t| &t.value) {
+                        Some(Token::Identifier(p)) => {
+                            extends = Some(p.clone());
+                            *pos += 1;
+                        }
+                        _ => {
+                            return Err(AsmError::new(
+                                "Expected parent struct name after 'extends'",
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(Directive::StructDef { name: sname, extends })
+        }
+        "ENDSTRUCT" | "ENDS" => Ok(Directive::EndStruct),
         "SETTING" => {
             let mut pairs = Vec::new();
             while *pos < tokens.len() {
@@ -962,6 +1182,8 @@ fn token_to_string(t: &Token) -> String {
         Token::Colon => ":".to_string(),
         Token::OpenParen => "(".to_string(),
         Token::CloseParen => ")".to_string(),
+        Token::OpenBracket => "[".to_string(),
+        Token::CloseBracket => "]".to_string(),
         Token::Dot => ".".to_string(),
         Token::At => "@".to_string(),
         Token::Newline => "".to_string(),

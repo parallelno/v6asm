@@ -1,0 +1,30 @@
+# Uninitialized instances and pools are allowed inside `.pack` blocks and are
+# measured like `.storage`; initialized instances are rejected there.
+
+[files]
+"main.asm" = '''
+.org $0100
+.struct actor
+a: byte
+b: word
+.ends
+
+.pack
+hero: actor
+pool: actor[3]
+HERO_LEN = hero.end - hero
+POOL_LEN = pool.end - pool
+.endpack
+
+after:
+'''
+
+[expect]
+
+[expect.symbols]
+hero = 256
+pool = 259
+"pool.end" = 268
+HERO_LEN = 3
+POOL_LEN = 9
+after = 268

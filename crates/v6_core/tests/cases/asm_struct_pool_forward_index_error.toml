@@ -1,0 +1,16 @@
+# Pool indices must resolve to a known constant at the point of use; a forward
+# reference is an error.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+.ends
+
+pool: item[4]
+X = pool[LATER].a
+LATER = 1
+'''
+
+[expect]
+error_contains = "Undefined symbol"

@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 use crate::diagnostics::{AsmError, AsmResult, SourceLocation};
 use crate::encoding::{Encoding, EncodingCase, EncodingType};
-use crate::expr::{eval_expr, eval_expr_reloc, ByteOp, Expr, RelocValue, SymValue};
+use crate::expr::{eval_expr, eval_expr_reloc, parse_expression, ByteOp, Expr, RelocValue, SymValue};
 use crate::instructions::{encode_instruction, ParsedOperand};
 use crate::lexer::{tokenize_line, LocatedToken, Token};
 use crate::object::section::{Reloc, RelocKind, Section};
 use crate::parser::{self, Directive, ParsedLine, PackKind, PrintArg, TextItem};
 use crate::preprocessor::{SourceLine, OriginalSource, ExpansionKind, MacroInvocationResult, expand_macro, parse_macro_invocation, split_leading_label};
 use crate::project::CpuMode;
-use crate::symbols::SymbolTable;
+use crate::symbols::{StructDef, StructField, StructFieldType, SymbolTable};
 
 const MAX_LOOP_ITERATIONS: usize = 100_000;
 
@@ -274,6 +274,21 @@ pub struct Assembler {
 
     // Loop/if expansion depth tracking
     macro_depth: usize,
+
+    /// Active `.struct` definition collection state (pass 1 only).
+    struct_builder: Option<StructBuilder>,
+    /// Field name awaiting its type inside a `.struct` body.
+    pending_field: Option<String>,
+}
+
+/// Collection state for a `.struct` ... `.endstruct` block (pass 1).
+struct StructBuilder {
+    name: String,
+    extends: Option<String>,
+    /// Field declarations in source order: (name, type).
+    fields: Vec<(String, StructFieldType)>,
+    file: String,
+    line: usize,
 }
 
 struct OptionalBlock {
@@ -311,6 +326,8 @@ impl Assembler {
             pack_arena_base: 0,
             pack_arena_size: 0,
             macro_depth: 0,
+            struct_builder: None,
+            pending_field: None,
         }
     }
 
@@ -375,11 +392,16 @@ impl Assembler {
                     continue;
                 }
                 MacroInvocationResult::UndefinedMacro(name) => {
-                    return Err(AsmError::new(format!(
-                        "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
-                        name, name
-                    ))
-                    .ensure_location(line.diag_file(), line.diag_line()));
+                    // A struct instance initializer (`name(f=v, ...)`) parses
+                    // like a macro invocation; when the name is a defined
+                    // struct, fall through to the normal parse path.
+                    if self.symbols.get_struct(&name).is_none() {
+                        return Err(AsmError::new(format!(
+                            "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
+                            name, name
+                        ))
+                        .ensure_location(line.diag_file(), line.diag_line()));
+                    }
                 }
                 MacroInvocationResult::NotAMacroCall => {}
             }
@@ -390,6 +412,10 @@ impl Assembler {
                 i += 1;
                 continue;
             }
+
+            let tokens = self
+                .expand_struct_indexing(&tokens)
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
 
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
                 .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
@@ -469,6 +495,17 @@ impl Assembler {
                             return Err(AsmError::new("Unexpected .endpack without matching .pack")
                                 .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
+                        ControlDirective::Struct { name, extends } => {
+                            let end = self.find_matching_block_end(lines, i, BlockKind::Struct)?;
+                            self.process_struct_body_pass1(&lines[i + 1..end], name.to_string(), extends.cloned(), line)
+                                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::EndStruct => {
+                            return Err(AsmError::new("Unexpected .endstruct without matching .struct")
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
+                        }
                     }
                 }
             }
@@ -481,20 +518,52 @@ impl Assembler {
     }
 
     fn process_parsed_line_pass1(&mut self, line: &SourceLine, parsed: &[ParsedLine]) -> AsmResult<()> {
+        // Inside a `.struct` body only field declarations (and the whitelisted
+        // preprocessor directives) are accepted.
+        if self.struct_builder.is_some() {
+            return self.process_struct_body_line(line, parsed);
+        }
         // Capture the scope in effect before any Label on this line changes it.
         // This lets a ConstDef on the same line as a label resolve @locals that
         // were defined in the scope that just ended.
         // e.g.  label: = @local_in_previous_scope
         let pre_label_scope = self.symbols.current_scope();
 
+        // The label a struct instance declaration attaches to (same line).
+        let mut line_label: Option<(String, bool)> = None;
+
         for item in parsed {
             match item {
                 ParsedLine::Empty => {}
                 ParsedLine::Label(name) => {
                     self.define_label_here(name, line.diag_file(), line.diag_line())?;
+                    line_label = Some((name.clone(), false));
                 }
                 ParsedLine::LocalLabel(name) => {
                     self.define_local_label_here(name, line.diag_file(), line.diag_line())?;
+                    line_label = Some((name.clone(), true));
+                }
+                ParsedLine::StructInstance { struct_name, count, init } => {
+                    let Some((label, is_local)) = line_label.clone() else {
+                        return Err(AsmError::new(
+                            "A struct instance declaration requires a label on the same line ('label: name')",
+                        )
+                        .ensure_location(line.diag_file(), line.diag_line()));
+                    };
+                    if is_local {
+                        return Err(AsmError::new(
+                            "Struct instances must use a global label",
+                        )
+                        .ensure_location(line.diag_file(), line.diag_line()));
+                    }
+                    self.process_struct_instance_pass1(&label, struct_name, count.as_ref(), init.as_ref(), line)
+                        .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                }
+                ParsedLine::FieldDecl(_) => {
+                    return Err(AsmError::new(
+                        "A field declaration is only allowed inside a .struct body",
+                    )
+                    .ensure_location(line.diag_file(), line.diag_line()));
                 }
                 ParsedLine::ConstDef { name, is_local, expr } => {
                     // Global symbols defined inside a macro body are namespaced
@@ -681,6 +750,13 @@ impl Assembler {
             }
             Directive::Pack(_) | Directive::EndPack => {
             }
+            Directive::StructDef { .. } | Directive::EndStruct => {
+                // Block directives are intercepted at the control-flow level;
+                // sharing the line with a label is not supported.
+                return Err(AsmError::new(
+                    ".struct/.endstruct must be the only statement on their line",
+                ));
+            }
             Directive::IncBin { path, offset, length } => {
                 // For pass 1 we need to know the size
                 let resolved = self.resolve_file_path(path)?;
@@ -746,11 +822,16 @@ impl Assembler {
                     continue;
                 }
                 MacroInvocationResult::UndefinedMacro(name) => {
-                    return Err(AsmError::new(format!(
-                        "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
-                        name, name
-                    ))
-                    .ensure_location(line.diag_file(), line.diag_line()));
+                    // A struct instance initializer (`name(f=v, ...)`) parses
+                    // like a macro invocation; when the name is a defined
+                    // struct, fall through to the normal parse path.
+                    if self.symbols.get_struct(&name).is_none() {
+                        return Err(AsmError::new(format!(
+                            "Undefined macro '{}'. Use '.macro {} (...) .endmacro' to define it first.",
+                            name, name
+                        ))
+                        .ensure_location(line.diag_file(), line.diag_line()));
+                    }
                 }
                 MacroInvocationResult::NotAMacroCall => {}
             }
@@ -769,6 +850,10 @@ impl Assembler {
                 i += 1;
                 continue;
             }
+
+            let tokens = self
+                .expand_struct_indexing(&tokens)
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
 
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
                 .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
@@ -933,6 +1018,35 @@ impl Assembler {
                             return Err(AsmError::new("Unexpected .endpack without matching .pack")
                                 .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
+                        ControlDirective::Struct { .. } => {
+                            // The definition was processed and registered in
+                            // pass 1; struct bodies emit no bytes, so pass 2
+                            // only records the listing rows.
+                            let end = self.find_matching_block_end(lines, i, BlockKind::Struct)?;
+                            self.listing_data.push(ListingLine {
+                                file: line.file.clone(),
+                                line_num: line.line_num,
+                                text: line.text.clone(),
+                                addr: self.pc,
+                                byte_count: 0,
+                                macro_expansion: line.macro_context.is_some(),
+                            });
+                            let end_line = &lines[end];
+                            self.listing_data.push(ListingLine {
+                                file: end_line.file.clone(),
+                                line_num: end_line.line_num,
+                                text: end_line.text.clone(),
+                                addr: self.pc,
+                                byte_count: 0,
+                                macro_expansion: end_line.macro_context.is_some(),
+                            });
+                            i = end + 1;
+                            continue;
+                        }
+                        ControlDirective::EndStruct => {
+                            return Err(AsmError::new("Unexpected .endstruct without matching .struct")
+                                .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
+                        }
                     }
                 }
             }
@@ -959,17 +1073,59 @@ impl Assembler {
         parsed: &[ParsedLine],
         tokens: &[LocatedToken],
     ) -> AsmResult<()> {
+        // Struct bodies are skipped in pass 2 (the definition was registered
+        // in pass 1 and emits no bytes).
+        if self.struct_builder.is_some() {
+            return Ok(());
+        }
         // Capture scope before any Label on this line changes it (see pass1 comment).
         let pre_label_scope = self.symbols.current_scope();
+
+        // The label a struct instance declaration attaches to (same line).
+        let mut line_label: Option<(String, bool)> = None;
 
         for item in parsed {
             match item {
                 ParsedLine::Empty => {}
                 ParsedLine::Label(name) => {
                     self.define_label_here(name, line.diag_file(), line.diag_line())?;
+                    line_label = Some((name.clone(), false));
                 }
                 ParsedLine::LocalLabel(name) => {
                     self.define_local_label_here(name, line.diag_file(), line.diag_line())?;
+                    line_label = Some((name.clone(), true));
+                }
+                ParsedLine::StructInstance { struct_name, count, init } => {
+                    let Some((label, is_local)) = line_label.clone() else {
+                        return Err(AsmError::new(
+                            "A struct instance declaration requires a label on the same line ('label: name')",
+                        )
+                        .ensure_location(line.diag_file(), line.diag_line()));
+                    };
+                    if is_local {
+                        return Err(AsmError::new(
+                            "Struct instances must use a global label",
+                        )
+                        .ensure_location(line.diag_file(), line.diag_line()));
+                    }
+                    let kind = if init.is_some() { EmissionKind::Data } else { EmissionKind::Storage };
+                    let (section, offset_or_address) = self.debug_position();
+                    self.process_struct_instance_pass2(&label, struct_name, count.as_ref(), init.as_ref(), line)
+                        .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                    self.record_debug_row(
+                        line,
+                        section,
+                        offset_or_address,
+                        line.column_offset as u32 + tokens.first().map(|token| token.loc.col as u32).unwrap_or(0),
+                        false,
+                        kind,
+                    );
+                }
+                ParsedLine::FieldDecl(_) => {
+                    return Err(AsmError::new(
+                        "A field declaration is only allowed inside a .struct body",
+                    )
+                    .ensure_location(line.diag_file(), line.diag_line()));
                 }
                 ParsedLine::ConstDef { name, is_local, expr } => {
                     let def_name = self.symbols.scoped_global_name(name);
@@ -1161,6 +1317,10 @@ impl Assembler {
             ParsedLine::Directive(Directive::EndOptional) => Some(ControlDirective::EndOptional),
             ParsedLine::Directive(Directive::Pack(_)) => Some(ControlDirective::Pack),
             ParsedLine::Directive(Directive::EndPack) => Some(ControlDirective::EndPack),
+            ParsedLine::Directive(Directive::StructDef { name, extends }) => {
+                Some(ControlDirective::Struct { name, extends: extends.as_ref() })
+            }
+            ParsedLine::Directive(Directive::EndStruct) => Some(ControlDirective::EndStruct),
             _ => None,
         }
     }
@@ -1192,13 +1352,15 @@ impl Assembler {
                     (BlockKind::If, ControlDirective::If(_))
                     | (BlockKind::Loop, ControlDirective::Loop(_))
                     | (BlockKind::Optional, ControlDirective::Optional)
-                    | (BlockKind::Pack, ControlDirective::Pack) => {
+                    | (BlockKind::Pack, ControlDirective::Pack)
+                    | (BlockKind::Struct, ControlDirective::Struct { .. }) => {
                         depth += 1;
                     }
                     (BlockKind::If, ControlDirective::EndIf)
                     | (BlockKind::Loop, ControlDirective::EndLoop)
                     | (BlockKind::Optional, ControlDirective::EndOptional)
-                    | (BlockKind::Pack, ControlDirective::EndPack) => {
+                    | (BlockKind::Pack, ControlDirective::EndPack)
+                    | (BlockKind::Struct, ControlDirective::EndStruct) => {
                         depth -= 1;
                         if depth == 0 {
                             return Ok(idx);
@@ -1527,20 +1689,7 @@ impl Assembler {
             }
             Directive::Dword(exprs) => {
                 for expr in exprs {
-                    if self.output_format == OutputFormat::Obj {
-                        let rv = self.eval_reloc(expr)?;
-                        let val = rv.require_constant().map_err(|_| AsmError::new(
-                            "relocatable .dword is not supported (no 32-bit V6C relocation)",
-                        ))? as u32;
-                        for i in 0..4 {
-                            self.out_emit_byte(((val >> (i * 8)) & 0xFF) as u8);
-                        }
-                    } else {
-                        let val = self.eval_expr(expr)? as u32;
-                        for i in 0..4 {
-                            self.out_emit_byte(((val >> (i * 8)) & 0xFF) as u8);
-                        }
-                    }
+                    self.emit_dword_expr(expr)?;
                 }
             }
             Directive::Text(items) => {
@@ -1634,6 +1783,11 @@ impl Assembler {
             Directive::If(_) | Directive::EndIf | Directive::Loop(_) | Directive::EndLoop => {}
             Directive::Optional | Directive::EndOptional => {}
             Directive::Pack(_) | Directive::EndPack => {}
+            Directive::StructDef { .. } | Directive::EndStruct => {
+                return Err(AsmError::new(
+                    ".struct/.endstruct must be the only statement on their line",
+                ));
+            }
             Directive::Include(_) | Directive::MacroDef { .. } | Directive::EndMacro => {}
         }
         Ok(())
@@ -1829,6 +1983,27 @@ impl Assembler {
         }, self.pc, active)
     }
 
+    /// Emit one 32-bit dword of data from an expression (`.dword`/`DD`
+    /// element). Relocatable values are not supported (no 32-bit V6C
+    /// relocation).
+    fn emit_dword_expr(&mut self, expr: &Expr) -> AsmResult<()> {
+        if self.output_format == OutputFormat::Obj {
+            let rv = self.eval_reloc(expr)?;
+            let val = rv.require_constant().map_err(|_| AsmError::new(
+                "relocatable .dword is not supported (no 32-bit V6C relocation)",
+            ))? as u32;
+            for i in 0..4 {
+                self.out_emit_byte(((val >> (i * 8)) & 0xFF) as u8);
+            }
+        } else {
+            let val = self.eval_expr(expr)? as u32;
+            for i in 0..4 {
+                self.out_emit_byte(((val >> (i * 8)) & 0xFF) as u8);
+            }
+        }
+        Ok(())
+    }
+
     /// Emit a single byte to the active output (ROM image or active section).
     fn out_emit_byte(&mut self, b: u8) {
         self.pending_align = 1;
@@ -1917,6 +2092,547 @@ impl Assembler {
                 self.symbols.define_local_label_in(name, self.pc, Some(self.obj.active), file, line)
             }
         }
+    }
+
+    // ── Struct definitions, instances and pools ─────────────────────────────
+
+    /// Collect a `.struct` ... `.endstruct` body in pass 1: field declarations
+    /// are gathered, then the struct is registered together with its generated
+    /// `name.<field>` offset constants and `name.size`.
+    fn process_struct_body_pass1(
+        &mut self,
+        body: &[SourceLine],
+        name: String,
+        extends: Option<String>,
+        open: &SourceLine,
+    ) -> AsmResult<()> {
+        if self.struct_builder.is_some() {
+            return Err(AsmError::new("Nested .struct definitions are not allowed")
+                .ensure_location(open.diag_file(), open.diag_line()));
+        }
+        self.struct_builder = Some(StructBuilder {
+            name: name.clone(),
+            extends,
+            fields: Vec::new(),
+            file: open.diag_file().to_string(),
+            line: open.diag_line(),
+        });
+        self.pending_field = None;
+        let result = self.process_lines_pass1(body);
+        let builder = self.struct_builder.take();
+        let dangling_field = self.pending_field.take();
+        result?;
+        if let Some(pending) = dangling_field {
+            let b = builder.as_ref().expect("struct builder active");
+            return Err(AsmError::new(format!(
+                "Field '{}' has no type; a field line must be 'name: type'",
+                pending
+            ))
+            .ensure_location(&b.file, b.line));
+        }
+        self.finalize_struct(builder.expect("struct builder active"))
+    }
+
+    /// Validate one struct-body line: only field declarations (`name: type`)
+    /// plus `.print` / `.error` are accepted here. `.if`/`.loop` blocks are
+    /// handled by the control-flow layer before this runs.
+    fn process_struct_body_line(&mut self, line: &SourceLine, parsed: &[ParsedLine]) -> AsmResult<()> {
+        let location = |e: AsmError| e.ensure_location(line.diag_file(), line.diag_line());
+        for item in parsed {
+            match item {
+                ParsedLine::Empty => {}
+                ParsedLine::Label(name) | ParsedLine::LocalLabel(name) => {
+                    if let Some(pending) = &self.pending_field {
+                        return Err(location(AsmError::new(format!(
+                            "Field '{}' has no type; a field line must be 'name: type'",
+                            pending
+                        ))));
+                    }
+                    self.pending_field = Some(name.clone());
+                }
+                ParsedLine::FieldDecl(kind) => {
+                    let Some(name) = self.pending_field.take() else {
+                        return Err(location(AsmError::new(
+                            "A field type must follow a field name: 'name: type'",
+                        )));
+                    };
+                    let key = name.to_uppercase();
+                    if key == "SIZE" || key == "END" {
+                        return Err(location(AsmError::new(format!(
+                            "'{}' is a reserved field name",
+                            name
+                        ))));
+                    }
+                    if let Some(builder) = self.struct_builder.as_mut() {
+                        builder.fields.push((name, *kind));
+                    }
+                }
+                ParsedLine::Directive(Directive::Error(args)) => {
+                    // `.error` is allowed inside a struct body; honor it here
+                    // because pass 2 skips struct definitions.
+                    let mut output = String::new();
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            output.push(' ');
+                        }
+                        match arg {
+                            PrintArg::Str(s) => output.push_str(s),
+                            PrintArg::Expr(expr) => {
+                                let val = self.eval_expr(expr)?;
+                                output.push_str(&val.to_string());
+                            }
+                        }
+                    }
+                    return Err(location(AsmError::new(output)));
+                }
+                ParsedLine::Directive(Directive::Print(args)) => {
+                    if !self.quiet {
+                        let mut output = String::new();
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                output.push(' ');
+                            }
+                            match arg {
+                                PrintArg::Str(s) => output.push_str(s),
+                                PrintArg::Expr(expr) => {
+                                    let val = self.eval_expr(expr)?;
+                                    output.push_str(&val.to_string());
+                                }
+                            }
+                        }
+                        eprintln!("{}", output);
+                    }
+                }
+                ParsedLine::Directive(Directive::StructDef { .. }) => {
+                    return Err(location(AsmError::new(
+                        "Nested .struct definitions are not allowed",
+                    )));
+                }
+                ParsedLine::Directive(Directive::EndStruct) => {
+                    return Err(location(AsmError::new(
+                        "Unexpected .endstruct inside a struct body",
+                    )));
+                }
+                ParsedLine::Directive(_) => {
+                    return Err(location(AsmError::new(
+                        "Directives (other than .if/.endif, .loop/.endloop, .print and .error) are not allowed inside a struct body",
+                    )));
+                }
+                ParsedLine::Instruction { .. } => {
+                    return Err(location(AsmError::new(
+                        "Instructions are not allowed inside a struct body",
+                    )));
+                }
+                ParsedLine::StructInstance { .. } => {
+                    return Err(location(AsmError::new(
+                        "Struct instances are not allowed inside a struct body",
+                    )));
+                }
+                ParsedLine::ConstDef { .. } | ParsedLine::VarDef { .. } => {
+                    return Err(location(AsmError::new(
+                        "Only field declarations are allowed inside a struct body",
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Compute the flattened field list (parent fields first, offsets final)
+    /// and register the struct with its generated constants.
+    fn finalize_struct(&mut self, builder: StructBuilder) -> AsmResult<()> {
+        let (parent_fields, parent_size, parent_name) = match &builder.extends {
+            Some(pname) => {
+                let parent = self.symbols.get_struct(pname).ok_or_else(|| {
+                    AsmError::new(format!("Unknown parent struct '{}'", pname))
+                        .ensure_location(&builder.file, builder.line)
+                })?;
+                (parent.fields.clone(), parent.size, Some(parent.name.clone()))
+            }
+            None => (Vec::new(), 0usize, None),
+        };
+        let mut fields = parent_fields;
+        let mut offset = parent_size;
+        for (fname, kind) in &builder.fields {
+            let fkey = fname.to_uppercase();
+            if fields.iter().any(|f| f.name.to_uppercase() == fkey) {
+                return Err(AsmError::new(format!(
+                    "Duplicate field '{}' in struct '{}'",
+                    fname, builder.name
+                ))
+                .ensure_location(&builder.file, builder.line));
+            }
+            fields.push(StructField {
+                name: fname.clone(),
+                offset,
+                kind: *kind,
+            });
+            offset += kind.size();
+        }
+        let def = StructDef {
+            name: builder.name.clone(),
+            parent: parent_name,
+            fields,
+            size: offset,
+            file: builder.file.clone(),
+            line: builder.line,
+        };
+        self.symbols.define_struct(def)?;
+        // Generated constants: `name.<field>` offsets and `name.size`.
+        let def = self.symbols.get_struct(&builder.name).expect("just defined").clone();
+        for f in &def.fields {
+            let cname = format!("{}.{}", builder.name, f.name);
+            self.symbols
+                .define_constant(&cname, f.offset as i64, &builder.file, builder.line)?;
+        }
+        let sname = format!("{}.size", builder.name);
+        self.symbols
+            .define_constant(&sname, def.size as i64, &builder.file, builder.line)?;
+        Ok(())
+    }
+
+    /// Resolve a struct instance/pool layout: `(count, total byte size)`.
+    fn struct_instance_layout(
+        &self,
+        struct_name: &str,
+        count: Option<&Expr>,
+        file: &str,
+        line_num: usize,
+    ) -> AsmResult<(Option<i64>, u16)> {
+        let def_size = self
+            .symbols
+            .get_struct(struct_name)
+            .ok_or_else(|| {
+                AsmError::new(format!("Unknown struct '{}'", struct_name))
+                    .ensure_location(file, line_num)
+            })?
+            .size as i64;
+        let count_val = match count {
+            Some(expr) => {
+                let n = self
+                    .eval_expr(expr)
+                    .map_err(|e| e.ensure_location(file, line_num))?;
+                if n <= 0 {
+                    return Err(AsmError::new("Struct pool count must be positive")
+                        .ensure_location(file, line_num));
+                }
+                Some(n)
+            }
+            None => None,
+        };
+        let total = def_size * count_val.unwrap_or(1);
+        if total > 0xFFFF {
+            return Err(AsmError::new(format!(
+                "Struct instance requires {} bytes, exceeding the 16-bit address space",
+                total
+            ))
+            .ensure_location(file, line_num));
+        }
+        Ok((count_val, total as u16))
+    }
+
+    /// Validate a named initializer list: field names must exist, no
+    /// duplicates. Value expressions are evaluated at emission time (pass 2)
+    /// so that forward references to labels work.
+    fn validate_struct_init(
+        &self,
+        struct_name: &str,
+        fields: &[(String, Expr)],
+        file: &str,
+        line_num: usize,
+    ) -> AsmResult<()> {
+        let def = self.symbols.get_struct(struct_name).ok_or_else(|| {
+            AsmError::new(format!("Unknown struct '{}'", struct_name)).ensure_location(file, line_num)
+        })?;
+        let mut seen: Vec<String> = Vec::new();
+        for (fname, _) in fields {
+            if def.field(fname).is_none() {
+                return Err(AsmError::new(format!(
+                    "Struct '{}' has no field '{}'",
+                    struct_name, fname
+                ))
+                .ensure_location(file, line_num));
+            }
+            let key = fname.to_uppercase();
+            if seen.contains(&key) {
+                return Err(AsmError::new(format!("Field '{}' initialized twice", fname))
+                    .ensure_location(file, line_num));
+            }
+            seen.push(key);
+        }
+        Ok(())
+    }
+
+    /// Pass-1 handling of a struct instance/pool declaration: register the
+    /// instance metadata, define the auto `label.end` symbol, and advance the
+    /// location counter by the total size (values are emitted in pass 2).
+    fn process_struct_instance_pass1(
+        &mut self,
+        label: &str,
+        struct_name: &str,
+        count: Option<&Expr>,
+        init: Option<&Vec<(String, Expr)>>,
+        line: &SourceLine,
+    ) -> AsmResult<()> {
+        let file = line.diag_file().to_string();
+        let line_num = line.diag_line();
+        let (count_val, total) = self.struct_instance_layout(struct_name, count, &file, line_num)?;
+        if let Some(fields) = init {
+            if fields.is_empty() {
+                return Err(AsmError::new(
+                    "Empty initializer list; write `name` for an uninitialized instance (contents undefined; zeroed by runtime startup)",
+                )
+                .ensure_location(&file, line_num));
+            }
+            self.validate_struct_init(struct_name, fields, &file, line_num)?;
+        }
+        let scoped = self.symbols.scoped_global_name(label);
+        self.symbols
+            .define_struct_instance(&scoped, struct_name, count_val, &file, line_num)?;
+        let end_name = format!("{}.end", scoped);
+        match self.output_format {
+            OutputFormat::Rom => self
+                .symbols
+                .define_label(&end_name, self.pc.wrapping_add(total), &file, line_num)?,
+            OutputFormat::Obj => self
+                .symbols
+                .define_label_in(&end_name, self.pc.wrapping_add(total), Some(self.obj.active), &file, line_num)?,
+        }
+        // Both forms occupy the same space; uninitialized instances are a
+        // pure reservation (`.storage`-like), initialized ones emit their
+        // bytes in pass 2.
+        self.out_reserve(total, None);
+        Ok(())
+    }
+
+    /// Pass-2 handling of a struct instance/pool declaration: re-define the
+    /// auto `label.end` symbol at the same address and emit the contents.
+    fn process_struct_instance_pass2(
+        &mut self,
+        label: &str,
+        struct_name: &str,
+        count: Option<&Expr>,
+        init: Option<&Vec<(String, Expr)>>,
+        line: &SourceLine,
+    ) -> AsmResult<()> {
+        let file = line.diag_file().to_string();
+        let line_num = line.diag_line();
+        let (count_val, total) = self.struct_instance_layout(struct_name, count, &file, line_num)?;
+        let scoped = self.symbols.scoped_global_name(label);
+        self.symbols
+            .define_struct_instance(&scoped, struct_name, count_val, &file, line_num)?;
+        let end_name = format!("{}.end", scoped);
+        match self.output_format {
+            OutputFormat::Rom => self
+                .symbols
+                .define_label(&end_name, self.pc.wrapping_add(total), &file, line_num)?,
+            OutputFormat::Obj => self
+                .symbols
+                .define_label_in(&end_name, self.pc.wrapping_add(total), Some(self.obj.active), &file, line_num)?,
+        }
+        match init {
+            None => self.out_reserve(total, None),
+            Some(fields) => self.emit_struct_init(struct_name, fields, &file, line_num)?,
+        }
+        Ok(())
+    }
+
+    /// Emit an initialized struct instance in field order (flattened, parent
+    /// fields first). Unnamed fields initialize to 0.
+    fn emit_struct_init(
+        &mut self,
+        struct_name: &str,
+        fields: &[(String, Expr)],
+        file: &str,
+        line_num: usize,
+    ) -> AsmResult<()> {
+        self.validate_struct_init(struct_name, fields, file, line_num)?;
+        let plan: Vec<(StructFieldType, Option<Expr>)> = {
+            let def = self
+                .symbols
+                .get_struct(struct_name)
+                .expect("checked by validate_struct_init")
+                .clone();
+            def.fields
+                .iter()
+                .map(|f| {
+                    let key = f.name.to_uppercase();
+                    let expr = fields
+                        .iter()
+                        .find(|(n, _)| n.to_uppercase() == key)
+                        .map(|(_, e)| e.clone());
+                    (f.kind, expr)
+                })
+                .collect()
+        };
+        for (kind, expr) in &plan {
+            match expr {
+                Some(e) => match kind {
+                    StructFieldType::Byte => self.emit_byte_expr(e)?,
+                    StructFieldType::Word => self.emit_word_expr(e)?,
+                    StructFieldType::Dword => self.emit_dword_expr(e)?,
+                },
+                None => {
+                    for _ in 0..kind.size() {
+                        self.out_emit_byte(0);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rewrite `pool[k]` / `pool[k].field` token sequences into plain
+    /// additions against the pool label: `pool + (k * size [+ field_offset])`.
+    /// The index must evaluate to a known constant at the point of use and is
+    /// range-checked against the pool's declared count. `[` has no other
+    /// meaning in the assembler syntax, so rewriting at the token level is
+    /// unambiguous; a pool *declaration* (`label: name[N]`) is skipped because
+    /// its bracket directly follows the label's colon.
+    fn expand_struct_indexing(&self, tokens: &[LocatedToken]) -> AsmResult<Vec<LocatedToken>> {
+        if !tokens.iter().any(|t| matches!(t.value, Token::OpenBracket)) {
+            return Ok(tokens.to_vec());
+        }
+        let mut out: Vec<LocatedToken> = Vec::new();
+        let mut i = 0usize;
+        while i < tokens.len() {
+            let prev_is_colon = out
+                .last()
+                .map(|t| matches!(t.value, Token::Colon))
+                .unwrap_or(false);
+            if !prev_is_colon {
+                if let (Token::Identifier(name), Some(Token::OpenBracket)) =
+                    (&tokens[i].value, tokens.get(i + 1).map(|t| &t.value))
+                {
+                    // Find the matching closing bracket.
+                    let mut depth = 1usize;
+                    let mut j = i + 2;
+                    while j < tokens.len() {
+                        match tokens[j].value {
+                            Token::OpenBracket => depth += 1,
+                            Token::CloseBracket => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    if j >= tokens.len() {
+                        return Err(AsmError::new("Unmatched '[' in expression")
+                            .with_location(tokens[i].loc.clone()));
+                    }
+                    // Expand nested indexing inside the brackets first.
+                    let inner = self.expand_struct_indexing(&tokens[i + 2..j])?;
+                    let (expr, consumed) = parse_expression(&inner)?;
+                    if consumed != inner.len() {
+                        return Err(AsmError::new(
+                            "Unexpected token in struct pool index expression",
+                        )
+                        .with_location(inner[consumed].loc.clone()));
+                    }
+                    let index = self
+                        .eval_expr(&expr)
+                        .map_err(|e| e.ensure_location(&tokens[i].loc.file, tokens[i].loc.line))?;
+                    // Optional `.field` after the closing bracket.
+                    let mut after = j + 1;
+                    let mut field: Option<String> = None;
+                    if matches!(tokens.get(after).map(|t| &t.value), Some(Token::Dot)) {
+                        match tokens.get(after + 1).map(|t| &t.value) {
+                            Some(Token::Identifier(f)) => {
+                                field = Some(f.clone());
+                                after += 2;
+                            }
+                            _ => {
+                                return Err(AsmError::new("Expected a field name after '.'")
+                                    .with_location(tokens[after].loc.clone()));
+                            }
+                        }
+                    }
+                    self.finish_struct_index_rewrite(
+                        tokens, i, after, name, field, index, &mut out,
+                    )?;
+                    i = after;
+                    continue;
+                }
+            }
+            out.push(tokens[i].clone());
+            i += 1;
+        }
+        Ok(out)
+    }
+
+    /// Second half of `expand_struct_indexing`: resolve the pool metadata,
+    /// range-check the index and emit the replacement tokens.
+    fn finish_struct_index_rewrite(
+        &self,
+        tokens: &[LocatedToken],
+        i: usize,
+        after: usize,
+        name: &str,
+        field: Option<String>,
+        index: i64,
+        out: &mut Vec<LocatedToken>,
+    ) -> AsmResult<()> {
+        let meta = self.symbols.get_instance(name).ok_or_else(|| {
+            AsmError::new(format!("'{}' is not a struct instance or pool", name))
+                .with_location(tokens[i].loc.clone())
+        })?;
+        let count = meta.count.ok_or_else(|| {
+            AsmError::new(format!(
+                "'{}' is not a struct pool; index access requires the 'name[N]' form",
+                name
+            ))
+            .with_location(tokens[i].loc.clone())
+        })?;
+        if index < 0 || index >= count {
+            return Err(AsmError::new(format!(
+                "Struct pool index {} is out of range for '{}[{}]'",
+                index, name, count
+            ))
+            .with_location(tokens[i].loc.clone()));
+        }
+        let field_offset = match &field {
+            Some(fname) => {
+                let def = self
+                    .symbols
+                    .get_struct(&meta.struct_name)
+                    .ok_or_else(|| {
+                        AsmError::new(format!("Unknown struct '{}'", meta.struct_name))
+                            .with_location(tokens[i].loc.clone())
+                    })?;
+                def.field(fname)
+                    .map(|f| f.offset as i64)
+                    .ok_or_else(|| {
+                        AsmError::new(format!("Struct has no field '{}'", fname))
+                            .with_location(tokens[after - 1].loc.clone())
+                    })?
+            }
+            None => 0,
+        };
+        let size = self
+            .symbols
+            .get_struct(&meta.struct_name)
+            .map(|d| d.size as i64)
+            .unwrap_or(0);
+        let delta = index * size + field_offset;
+        let open_loc = tokens[i + 1].loc.clone();
+        out.push(tokens[i].clone());
+        out.push(LocatedToken::new(
+            Token::Operator("+".to_string()),
+            &open_loc.file,
+            open_loc.line,
+            open_loc.col,
+        ));
+        out.push(LocatedToken::new(
+            Token::Number(delta),
+            &open_loc.file,
+            open_loc.line,
+            open_loc.col,
+        ));
+        Ok(())
     }
 
     /// Switch to (or create) a section, syncing the location counter. Applies
@@ -2163,11 +2879,16 @@ impl Assembler {
         let mut labels: Vec<PackLabel> = Vec::new();
         let mut consts: Vec<PackConst> = Vec::new();
         let mut current_global_label: Option<String> = None;
+        // The label a struct instance declaration attaches to (same line).
+        let mut last_label: Option<(String, bool)> = None;
 
         for line in &lines[start + 1..end] {
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
                 .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if tokens.is_empty() { continue; }
+            let tokens = self
+                .expand_struct_indexing(&tokens)
+                .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             let parsed = parser::parse_line(&tokens, self.cpu_mode)
                 .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             for item in &parsed {
@@ -2176,9 +2897,11 @@ impl Assembler {
                     ParsedLine::Label(name) => {
                         labels.push(PackLabel { name: name.clone(), is_local: false, offset: size });
                         current_global_label = Some(name.clone());
+                        last_label = Some((name.clone(), false));
                     }
                     ParsedLine::LocalLabel(name) => {
                         labels.push(PackLabel { name: name.clone(), is_local: true, offset: size });
+                        last_label = Some((name.clone(), true));
                     }
                     ParsedLine::ConstDef { name, is_local, expr } => {
                         consts.push(PackConst {
@@ -2216,6 +2939,52 @@ impl Assembler {
                                 .ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)));
                         }
                         size += len as u32;
+                    }
+                    ParsedLine::StructInstance { struct_name, count, init } => {
+                        if init.is_some() {
+                            return Err(AsmError::new(
+                                "Initialized struct instances are not allowed inside a .pack block",
+                            )
+                            .ensure_location(line.diag_file(), line.diag_line())
+                            .ensure_notes(expansion_notes(line)));
+                        }
+                        let Some((label, is_local)) = last_label.clone() else {
+                            return Err(AsmError::new(
+                                "A struct instance declaration requires a label on the same line ('label: name')",
+                            )
+                            .ensure_location(line.diag_file(), line.diag_line())
+                            .ensure_notes(expansion_notes(line)));
+                        };
+                        if is_local {
+                            return Err(AsmError::new("Struct instances must use a global label")
+                                .ensure_location(line.diag_file(), line.diag_line())
+                                .ensure_notes(expansion_notes(line)));
+                        }
+                        let (count_val, total) = self
+                            .struct_instance_layout(struct_name, count.as_ref(), line.diag_file(), line.diag_line())
+                            .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
+                        self.symbols.define_struct_instance(
+                            &label,
+                            struct_name,
+                            count_val,
+                            line.diag_file(),
+                            line.diag_line(),
+                        )?;
+                        // `label.end` is resolved after the pack layout assigns
+                        // final addresses to the block's labels.
+                        consts.push(PackConst {
+                            name: format!("{}.end", label),
+                            is_local: false,
+                            expr: Expr::BinaryOp {
+                                op: crate::expr::BinaryOp::Add,
+                                left: Box::new(Expr::Symbol(label.clone())),
+                                right: Box::new(Expr::Number(total as i64)),
+                            },
+                            scope_label: current_global_label.clone(),
+                            file: line.file.clone(),
+                            line_num: line.line_num,
+                        });
+                        size += total as u32;
                     }
                     _ => {
                         return Err(AsmError::new(
@@ -2402,6 +3171,7 @@ enum BlockKind {
     Loop,
     Optional,
     Pack,
+    Struct,
 }
 
 #[derive(Clone, Copy)]
@@ -2418,6 +3188,7 @@ impl BlockKind {
             BlockKind::Loop => ".endloop",
             BlockKind::Optional => ".endoptional",
             BlockKind::Pack => ".endpack",
+            BlockKind::Struct => ".endstruct",
         }
     }
 }
@@ -2431,6 +3202,8 @@ enum ControlDirective<'a> {
     EndOptional,
     Pack,
     EndPack,
+    Struct { name: &'a str, extends: Option<&'a String> },
+    EndStruct,
 }
 
 /// Build human-readable notes describing the macro invocation chain that led

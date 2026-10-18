@@ -1,0 +1,14 @@
+# A label defined after a struct with the same name is also an error.
+
+[files]
+"main.asm" = '''
+.struct item
+a: byte
+.ends
+
+x: item
+item:
+'''
+
+[expect]
+error_contains = "collides"

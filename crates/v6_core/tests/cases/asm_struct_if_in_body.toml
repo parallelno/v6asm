@@ -1,0 +1,26 @@
+# `.if` works inside a struct body (compile-time field selection).
+
+[files]
+"main.asm" = '''
+.org $0100
+FEATURE = 0
+
+.struct cfg
+common: byte
+.if FEATURE
+extra: word
+.endif
+tail: byte
+.endstruct
+
+inst: cfg
+'''
+
+[expect]
+
+[expect.symbols]
+"cfg.common" = 0
+"cfg.tail" = 1
+"cfg.size" = 2
+inst = 256
+"inst.end" = 258

@@ -61,6 +61,73 @@ pub struct MacroParam {
     pub default: Option<String>,
 }
 
+/// The size class of a struct field. Reuses the data-directive spellings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructFieldType {
+    Byte,
+    Word,
+    Dword,
+}
+
+impl StructFieldType {
+    pub fn size(self) -> usize {
+        match self {
+            StructFieldType::Byte => 1,
+            StructFieldType::Word => 2,
+            StructFieldType::Dword => 4,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_uppercase().as_str() {
+            "BYTE" | "DB" => Some(StructFieldType::Byte),
+            "WORD" | "DW" => Some(StructFieldType::Word),
+            "DWORD" | "DD" => Some(StructFieldType::Dword),
+            _ => None,
+        }
+    }
+}
+
+/// A single field of a struct definition. Offsets are final: with `extends`
+/// the parent's fields come first at their original offsets.
+#[derive(Debug, Clone)]
+pub struct StructField {
+    pub name: String,
+    pub offset: usize,
+    pub kind: StructFieldType,
+}
+
+/// A struct definition. `name.<field>` offset constants and `name.size` are
+/// derived from it at definition time.
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub parent: Option<String>,
+    pub fields: Vec<StructField>,
+    pub size: usize,
+    pub file: String,
+    pub line: usize,
+}
+
+impl StructDef {
+    /// Look up a field by name (case-insensitive), including inherited ones.
+    pub fn field(&self, name: &str) -> Option<&StructField> {
+        let key = name.to_uppercase();
+        self.fields.iter().find(|f| f.name.to_uppercase() == key)
+    }
+}
+
+/// Metadata for a struct instance (`label: name`) or pool (`label: name[N]`).
+#[derive(Debug, Clone)]
+pub struct InstanceMeta {
+    /// Case-insensitive key of the instance's struct definition.
+    pub struct_name: String,
+    /// Pool element count, or `None` for a single instance.
+    pub count: Option<i64>,
+    pub file: String,
+    pub line: usize,
+}
+
 /// The symbol table manages labels, constants, variables, and macros
 pub struct SymbolTable {
     /// Global symbols (labels, constants, variables)
@@ -69,6 +136,10 @@ pub struct SymbolTable {
     locals: HashMap<(String, usize), Vec<SymbolInfo>>,
     /// Macro definitions
     macros: HashMap<String, MacroDef>,
+    /// Struct definitions keyed by case-insensitive name
+    structs: HashMap<String, StructDef>,
+    /// Struct instances and pools keyed by case-insensitive label name
+    instances: HashMap<String, InstanceMeta>,
     /// Current scope ID (changes at each global label)
     current_scope: usize,
     /// Current global label name (for scoping)
@@ -89,6 +160,8 @@ impl SymbolTable {
             globals: HashMap::new(),
             locals: HashMap::new(),
             macros: HashMap::new(),
+            structs: HashMap::new(),
+            instances: HashMap::new(),
             current_scope: 0,
             current_global_label: None,
             macro_call_count: 0,
@@ -116,6 +189,13 @@ impl SymbolTable {
     /// (object mode). When `section` is `Some`, `addr` is a section-relative
     /// offset.
     pub fn define_label_in(&mut self, name: &str, addr: u16, section: Option<usize>, file: &str, line: usize) -> AsmResult<()> {
+        let key = ci(name);
+        if self.structs.contains_key(&key) {
+            return Err(AsmError::new(format!(
+                "Label '{}' collides with the name of a defined struct",
+                name
+            )));
+        }
         let info = SymbolInfo {
             value: Some(addr as i64),
             expr: None,
@@ -177,6 +257,12 @@ impl SymbolTable {
     /// Define a constant (immutable unless previously declared with .var)
     pub fn define_constant(&mut self, name: &str, value: i64, file: &str, line: usize) -> AsmResult<()> {
         let key = ci(name);
+        if self.structs.contains_key(&key) {
+            return Err(AsmError::new(format!(
+                "Constant '{}' collides with the name of a defined struct",
+                name
+            )));
+        }
         if let Some(existing) = self.globals.get(&key) {
             if !existing.is_mutable && existing.value.is_some() {
                 // Allow same-value redefinition (pass 2)
@@ -227,6 +313,13 @@ impl SymbolTable {
 
     /// Define a mutable variable
     pub fn define_variable(&mut self, name: &str, value: i64, file: &str, line: usize) -> AsmResult<()> {
+        let key = ci(name);
+        if self.structs.contains_key(&key) {
+            return Err(AsmError::new(format!(
+                "Variable '{}' collides with the name of a defined struct",
+                name
+            )));
+        }
         let info = SymbolInfo {
             value: Some(value),
             expr: None,
@@ -262,6 +355,12 @@ impl SymbolTable {
     /// appears as a section-relative (relocatable) entry in the ELF symtab instead of ABS.
     pub fn define_constant_in_section(&mut self, name: &str, value: i64, section: usize, file: &str, line: usize) -> AsmResult<()> {
         let key = ci(name);
+        if self.structs.contains_key(&key) {
+            return Err(AsmError::new(format!(
+                "Constant '{}' collides with the name of a defined struct",
+                name
+            )));
+        }
         if let Some(existing) = self.globals.get_mut(&key) {
             if !existing.is_mutable && existing.value.is_some() {
                 if existing.value != Some(value) {
@@ -292,6 +391,12 @@ impl SymbolTable {
     /// Set a constant with deferred expression (for first pass forward refs)
     pub fn define_constant_deferred(&mut self, name: &str, expr: Expr, file: &str, line: usize) -> AsmResult<()> {
         let key = ci(name);
+        if self.structs.contains_key(&key) {
+            return Err(AsmError::new(format!(
+                "Constant '{}' collides with the name of a defined struct",
+                name
+            )));
+        }
         let is_update = if let Some(existing) = self.globals.get(&key) {
             existing.is_mutable
         } else {
@@ -334,7 +439,13 @@ impl SymbolTable {
     /// then a plain global of the same name. A fully-qualified namespaced name
     /// (`MacroName_<call-index>.Name`) also resolves from anywhere.
     pub fn resolve(&self, name: &str) -> Option<i64> {
-        self.globals.get(&self.effective_global_key(name)).and_then(|s| s.value)
+        if let Some(value) = self.globals.get(&self.effective_global_key(name)).and_then(|s| s.value) {
+            return Some(value);
+        }
+        // `label.field` / `pool.field` fall back to the struct instance
+        // registry when the dotted name is not a plain (or macro-scoped)
+        // symbol.
+        self.resolve_instance_field(name).and_then(|info| info.value)
     }
 
     /// Resolve a local symbol in the current scope
@@ -361,18 +472,23 @@ impl SymbolTable {
     }
 
     /// Look up full symbol info for a global symbol (including any active
-    /// macro-expansion namespace).
-    pub fn get_global_info(&self, name: &str) -> Option<&SymbolInfo> {
-        self.globals.get(&self.effective_global_key(name))
+    /// macro-expansion namespace). Dotted `instance.field` references that are
+    /// not plain symbols resolve through the struct instance registry as
+    /// `base_label + offset(field)`.
+    pub fn get_global_info(&self, name: &str) -> Option<SymbolInfo> {
+        if let Some(info) = self.globals.get(&self.effective_global_key(name)) {
+            return Some(info.clone());
+        }
+        self.resolve_instance_field(name)
     }
 
     /// Look up full symbol info for a local symbol in the current scope.
-    pub fn get_local_info(&self, name: &str) -> Option<&SymbolInfo> {
+    pub fn get_local_info(&self, name: &str) -> Option<SymbolInfo> {
         let key = (ci(name), self.current_scope);
         if let Some(entries) = self.locals.get(&key) {
             for entry in entries.iter().rev() {
                 if entry.value.is_some() {
-                    return Some(entry);
+                    return Some(entry.clone());
                 }
             }
         }
@@ -380,12 +496,12 @@ impl SymbolTable {
     }
 
     /// Look up full symbol info for a local symbol in a specific scope.
-    pub fn get_local_info_in_scope(&self, name: &str, scope_id: usize) -> Option<&SymbolInfo> {
+    pub fn get_local_info_in_scope(&self, name: &str, scope_id: usize) -> Option<SymbolInfo> {
         let key = (ci(name), scope_id);
         if let Some(entries) = self.locals.get(&key) {
             for entry in entries.iter().rev() {
                 if entry.value.is_some() {
-                    return Some(entry);
+                    return Some(entry.clone());
                 }
             }
         }
@@ -406,6 +522,88 @@ impl SymbolTable {
     /// Look up a macro definition
     pub fn get_macro(&self, name: &str) -> Option<&MacroDef> {
         self.macros.get(&ci(name))
+    }
+
+    /// Register a struct definition. The name must not collide with any
+    /// existing global symbol or struct.
+    pub fn define_struct(&mut self, def: StructDef) -> AsmResult<()> {
+        let key = ci(&def.name);
+        if self.structs.contains_key(&key) {
+            return Err(AsmError::new(format!("Struct '{}' already defined", def.name))
+                .ensure_location(&def.file, def.line));
+        }
+        if self.globals.contains_key(&key) {
+            return Err(AsmError::new(format!(
+                "Struct name '{}' collides with an existing label or constant",
+                def.name
+            ))
+            .ensure_location(&def.file, def.line));
+        }
+        self.structs.insert(key, def);
+        Ok(())
+    }
+
+    /// Look up a struct definition
+    pub fn get_struct(&self, name: &str) -> Option<&StructDef> {
+        self.structs.get(&ci(name))
+    }
+
+    /// All struct definitions (for debug metadata emission)
+    pub fn all_structs(&self) -> impl Iterator<Item = &StructDef> {
+        self.structs.values()
+    }
+
+    /// Record metadata for a struct instance or pool (`label: name[N]`).
+    /// The label symbol itself is defined through the normal label path;
+    /// this only records the association, so it is idempotent across passes.
+    pub fn define_struct_instance(&mut self, label: &str, struct_name: &str, count: Option<i64>, file: &str, line: usize) -> AsmResult<()> {
+        let skey = ci(struct_name);
+        if !self.structs.contains_key(&skey) {
+            return Err(AsmError::new(format!("Unknown struct '{}'", struct_name))
+                .ensure_location(file, line));
+        }
+        self.instances.insert(ci(label), InstanceMeta {
+            struct_name: skey,
+            count,
+            file: file.to_string(),
+            line,
+        });
+        Ok(())
+    }
+
+    /// Look up struct instance / pool metadata by label name. Inside a macro
+    /// expansion the per-invocation namespace prefix is applied, mirroring
+    /// global symbol lookup.
+    pub fn get_instance(&self, name: &str) -> Option<&InstanceMeta> {
+        self.instances.get(&self.effective_global_key(name))
+    }
+
+    /// All struct instances (for debug metadata emission)
+    pub fn all_instances(&self) -> impl Iterator<Item = (&String, &InstanceMeta)> {
+        self.instances.iter()
+    }
+
+    /// Resolve a dotted `instance.field` reference through the struct instance
+    /// registry: `label.field` addresses `label + offset(field)`, and for a
+    /// pool label it addresses element 0. Returns full symbol info (carrying
+    /// the base label's section affiliation in object mode) so both the plain
+    /// and the relocatable resolvers can use it.
+    fn resolve_instance_field(&self, name: &str) -> Option<SymbolInfo> {
+        let dot = name.rfind('.')?;
+        let base = &name[..dot];
+        let field = &name[dot + 1..];
+        if base.is_empty() || field.is_empty() {
+            return None;
+        }
+        let meta = self.instances.get(&self.effective_global_key(base))?;
+        let def = self.structs.get(&meta.struct_name)?;
+        let f = def.field(field)?;
+        let info = self.globals.get(&self.effective_global_key(base))?;
+        let base_value = info.value?;
+        let mut result = info.clone();
+        result.value = Some(base_value + f.offset as i64);
+        result.is_code_label = false;
+        Some(result)
     }
 
     /// Begin a macro expansion scope
