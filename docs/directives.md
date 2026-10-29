@@ -136,10 +136,77 @@ Use `.setting optional, prune` to fall back to assemble-time pruning in object
 mode, or `.setting optional, sections` to force per-section emission. See
 [`.setting`](#setting) and [Object Output](object-output.md).
 
+### Function regions (`-g`)
+
+With debug output enabled (`-g`), every emitted optional block is also described
+as one **function region** — a half-open address range `[start, end)` plus the
+labels inside it. Debuggers use these regions to name assembly functions and
+rebuild a call stack from executed-instruction history:
+
+- One block is one logical stack frame. Several entry labels can belong to the
+  same frame (for example a fast-path entry sharing a common tail), and calls
+  between labels of the same block do not create extra frames.
+- Every source label defined inside the block is a **potential entry**. The
+  entry actually reached by execution selects the function name and its source
+  definition. Entry metadata is emitted for every such label, even if it is
+  never referenced by name in the source (for example an entry reached only
+  through an indirect jump or another object file). Scoped `@` labels and
+  macro-generated names are not entries because their spelling is not unique;
+  constants (`name = expr`) are not entries because they have no address.
+- The block must occupy at least one byte of address space (emitted bytes or
+  reserved `.storage`); an empty range produces no region. Regions are recorded
+  within one output section, so a block whose content ends in a different
+  section than it started produces no region.
+- Optional blocks used as functions must not fall through into each other —
+  execution enters a region through a call, jump, or indirect transfer, and
+  returns or jumps out again.
+
+Region metadata does not change emitted code or data bytes and does not alter
+the pruning settings above:
+
+- **Object mode** — the region start and every entry address are emitted as
+  relocations against the owning code/data section (by default the block's own
+  `.text.<label>` / `.data.<label>` / `.bss.<label>` section). The linker
+  rebases them for retained sections; garbage-collected blocks may leave
+  `0xFFFF` tombstones that debuggers filter out. Real starts or entry labels at
+  `0xFFFF` share this accepted limitation.
+- **ROM mode** — the companion `.elf` contains final absolute addresses after
+  assemble-time pruning, so only blocks present in the ROM are described.
+
+See [Debug Metadata](debug-metadata.md#optional-block-function-regions) for the
+DWARF encoding and consumer rules.
+
 
 ## `.function` / `.endfunction`
 
-This is an alias for `.optional` / `.endoptional`. Short forms: `.func` / `.endfunc`
+Function-oriented spelling of [`.optional`](#optional--endoptional), with short
+forms `.func` / `.endfunc`. It is exactly equivalent to `.optional` /
+`.endoptional` — same pruning rules, same `.setting optional` handling, and the
+same object-mode section naming.
+
+Use it when the block describes a function:
+
+```asm
+call draw
+
+.func
+draw:
+  mvi a, 0
+draw_fast:
+  ret           ; shared tail for both entries
+.endfunc
+```
+
+Both `draw` and `draw_fast` are potential entries of the same function region.
+With `-g`, a debugger names the frame after the entry that execution actually
+entered, while the highlighted source line keeps following real execution inside
+the block (see [Function regions](#function-regions--g)). Without `-g` the
+directive only controls pruning.
+
+`.function` is documentation, not a callable symbol: it does not export the
+block, emit a prologue/epilogue, or make the block reachable. Reference one of
+its labels to keep the block. The directive name itself is ignored when choosing
+the region name.
 
 ## `.setting`
 

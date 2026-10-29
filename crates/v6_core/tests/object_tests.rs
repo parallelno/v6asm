@@ -627,6 +627,36 @@ fn optional_code_block_becomes_text_section() {
 }
 
 #[test]
+fn optional_debug_regions_include_unreferenced_entries_and_relocations() {
+    let asm = assemble_obj(".opt\nfirst:\nnop\nalternate:\nret\n.endopt\n").unwrap();
+    assert_eq!(asm.debug_function_regions.len(), 1);
+    let region = &asm.debug_function_regions[0];
+    assert_eq!((region.start, region.end), (0, 2));
+    let mut debug = v6_core::object::dwarf::debug_sections(
+        &asm.debug_rows, &[], &[], &[], asm.project_dir(), true);
+    v6_core::object::dwarf::add_function_regions(&mut debug, &asm, true);
+    let info = debug.iter().find(|s| s.name == ".debug_info").unwrap();
+    assert!(info.data.windows(6).any(|w| w == b"first\0"));
+    assert!(info.data.windows(10).any(|w| w == b"alternate\0"));
+    let addresses: Vec<_> = info.relocs.iter().filter(|r|
+        matches!(r.target, RelocTarget::Section(s) if Some(s) == region.section)
+    ).map(|r| r.addend).collect();
+    assert_eq!(addresses, vec![0, 0, 1]);
+    let bytes = generate_object(&asm, &ObjConfig { debug: true }).unwrap();
+    assert!(!bytes.is_empty());
+}
+
+#[test]
+fn optional_debug_regions_rom_uses_absolute_addresses_and_prunes_unused() {
+    let asm = assemble_rom(".org 0x100\ncall first\n.opt\nfirst:\nnop\nalternate:\nret\n.endopt\n.opt\nunused:\nret\n.endopt\n").unwrap();
+    assert_eq!(asm.debug_function_regions.len(), 1);
+    let region = &asm.debug_function_regions[0];
+    assert_eq!((region.section, region.start, region.end), (None, 0x103, 0x105));
+    let elf = generate_debug_companion(&asm, &RomConfig::default());
+    assert!(elf.windows(10).any(|w| w == b"alternate\0"));
+}
+
+#[test]
 fn optional_data_block_becomes_data_section() {
     use v6_core::object::section::{SHF_ALLOC, SHF_WRITE, SHT_PROGBITS};
 

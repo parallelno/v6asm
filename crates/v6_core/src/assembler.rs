@@ -14,6 +14,14 @@ use crate::symbols::{StructDef, StructField, StructFieldType, SymbolTable};
 
 const MAX_LOOP_ITERATIONS: usize = 100_000;
 
+/// Retained optional-block ownership in final section-relative/ROM coordinates.
+#[derive(Debug, Clone)]
+pub struct DebugFunctionRegion {
+    pub section: Option<usize>,
+    pub start: u32,
+    pub end: u32,
+}
+
 /// Output backend selected for an assembly run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -244,6 +252,7 @@ pub struct Assembler {
     pub listing_data: Vec<ListingLine>,
     /// Machine-readable instruction ranges used by debug metadata writers.
     pub debug_rows: Vec<DebugLineRow>,
+    pub debug_function_regions: Vec<DebugFunctionRegion>,
     pub original_sources: Vec<OriginalSource>,
     pub pc: u16,
     pub cpu_mode: CpuMode,
@@ -309,6 +318,7 @@ impl Assembler {
             output: OutputBuffer::new(),
             listing_data: Vec::new(),
             debug_rows: Vec::new(),
+            debug_function_regions: Vec::new(),
             original_sources: Vec::new(),
             pc: 0,
             cpu_mode,
@@ -350,6 +360,7 @@ impl Assembler {
         self.pc = 0;
         self.encoding = Encoding::default();
         self.debug_rows.clear();
+        self.debug_function_regions.clear();
         self.reset_object_state();
         self.pass2(lines)?;
 
@@ -951,11 +962,15 @@ impl Assembler {
                             match self.resolve_optional_block(lines, i + 1, end)? {
                                 OptionalAction::Skip => {}
                                 OptionalAction::IncludeHere => {
+                                    let (section, start) = self.debug_position();
                                     self.process_lines_pass2(&lines[i + 1..end])?;
+                                    self.record_function_region(section, start);
                                 }
                                 OptionalAction::IncludeInSection(name) => {
                                     let saved = self.enter_optional_section(&name);
+                                    let (section, start) = self.debug_position();
                                     self.process_lines_pass2(&lines[i + 1..end])?;
+                                    self.record_function_region(section, start);
                                     self.leave_optional_section(saved);
                                 }
                             }
@@ -1236,6 +1251,16 @@ impl Assembler {
             }
         }
         Ok(())
+    }
+
+    fn record_function_region(&mut self, section: Option<usize>, start: u32) {
+        let (end_section, mut end) = self.debug_position();
+        if section == end_section {
+            if section.is_none() && end < start { end += 0x10000; }
+            if end > start {
+                self.debug_function_regions.push(DebugFunctionRegion { section, start, end });
+            }
+        }
     }
 
     fn debug_position(&self) -> (Option<usize>, u32) {

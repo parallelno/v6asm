@@ -105,6 +105,27 @@ listing behavior.
 
 ## Symbols
 
+### Optional-block function regions
+
+With `-g`, every emitted optional block contributes a DWARF v4 vendor region
+entry (`DW_TAG` `0x4080`) with `DW_AT_low_pc` (`DW_FORM_addr`, two bytes) and
+`DW_AT_high_pc` (`DW_FORM_data4`, byte size). Its `DW_TAG_entry_point` children
+describe all non-local source labels in that range, including ELF-local symbols.
+Each child has `DW_AT_name` (inline string), `DW_AT_low_pc` (two-byte address),
+vendor source-path attribute `0x3f01` (inline string), and `DW_AT_decl_line`
+(`DW_FORM_udata`). The region DIE offset identifies the region within its ELF.
+
+Object output relocates region starts and entry addresses against their owning
+code/data section. Linker garbage collection may leave descriptions with address
+`0xFFFF`; consumers exclude these tombstones. Real entries at that address share
+this accepted debugging limitation. Direct-ROM companions contain final absolute
+addresses after assembler pruning. Debug metadata preserves code bytes and the
+existing optional-block pruning settings.
+
+One optional block is one logical function frame; its observed entrance selects
+the label name. Internal calls remain in that frame. Optional blocks must not
+fall through into each other.
+
 For a debug object, module-level labels and immutable absolute constants are
 included in `.symtab` as local symbols unless `.globl`, `.global`, or `.weak`
 gives them an external binding.

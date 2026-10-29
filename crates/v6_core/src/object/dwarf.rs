@@ -245,6 +245,62 @@ const DW_LNE_SET_ADDRESS: u8 = 2;
 /// `DW_TAG_inlined_subroutine` DIE tree with `DW_AT_call_file`/`call_line`,
 /// while the line table maps the expanded instructions to the macro body
 /// lines (keeping an invocation-site entry row per expansion).
+/// DWARF v4 optional regions: vendor tag 0x4080 with low_pc/high_pc(size),
+/// entry_point children with name/low_pc/decl_line and source path attribute
+/// 0x3f01. Inline strings keep these contributions independent of string offsets.
+pub fn add_function_regions(sections: &mut [ExtraSection], asm: &crate::assembler::Assembler, relocate: bool) {
+    if asm.debug_function_regions.is_empty() { return; }
+    let abbrev = sections.iter_mut().find(|s| s.name == ".debug_abbrev").unwrap();
+    abbrev.data.pop();
+    for (code, tag, children, attrs) in [
+        (11, 0x4080, 1, vec![(0x11, 0x01), (0x12, 0x06)]),
+        (12, 0x03, 0, vec![(0x03, 0x08), (0x11, 0x01), (0x3f01, 0x08), (0x3b, 0x0f)]),
+    ] {
+        write_uleb(&mut abbrev.data, code);
+        write_uleb(&mut abbrev.data, tag);
+        abbrev.data.push(children);
+        for (attr, form) in attrs {
+            write_uleb(&mut abbrev.data, attr);
+            write_uleb(&mut abbrev.data, form);
+        }
+        abbrev.data.extend_from_slice(&[0, 0]);
+    }
+    abbrev.data.push(0);
+    let info = sections.iter_mut().find(|s| s.name == ".debug_info").unwrap();
+    info.data.pop(); // compilation-unit children terminator
+    for region in &asm.debug_function_regions {
+        write_uleb(&mut info.data, 11);
+        write_function_address(info, region.section, region.start, relocate);
+        info.data.extend_from_slice(&(region.end - region.start).to_le_bytes());
+        let mut entries: Vec<_> = asm.symbols.all_globals().values().filter(|s| {
+            s.is_code_label && !s.is_local && !s.original_name.starts_with('@')
+                && !s.original_name.contains('.') && s.section == region.section
+                && s.value.is_some_and(|v| v >= region.start as i64 && v < region.end as i64)
+        }).collect();
+        entries.sort_by(|a, b| (a.value, &a.original_name).cmp(&(b.value, &b.original_name)));
+        for entry in entries {
+            write_uleb(&mut info.data, 12);
+            push_string(&mut info.data, &entry.original_name);
+            write_function_address(info, region.section, entry.value.unwrap() as u32, relocate);
+            push_string(&mut info.data, &entry.file.replace('\\', "/"));
+            write_uleb(&mut info.data, entry.line as u64);
+        }
+        info.data.push(0);
+    }
+    info.data.push(0);
+    write_initial_length(&mut info.data);
+}
+
+fn write_function_address(info: &mut ExtraSection, section: Option<usize>, address: u32, relocate: bool) {
+    if let Some(section) = section.filter(|_| relocate) {
+        info.relocs.push(Reloc { offset: info.data.len() as u32, kind: RelocKind::Abs16,
+            target: RelocTarget::Section(section), addend: address as i64 });
+        info.data.extend_from_slice(&0u16.to_le_bytes());
+    } else {
+        info.data.extend_from_slice(&(address as u16).to_le_bytes());
+    }
+}
+
 pub fn debug_sections(
     rows: &[DebugLineRow],
     constants: &[DebugConstant],
