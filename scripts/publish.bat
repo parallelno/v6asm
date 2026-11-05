@@ -5,4 +5,4 @@ for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyy.MM.dd"') d
 
 cargo build --release
 git tag %TAG%
-git push origin %TAG%
+git push --follow-tags
