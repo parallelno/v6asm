@@ -62,7 +62,7 @@ Example: CWD `/project`, source `/project/src/main.asm`, `-I libs`, operand `com
 ```
 
 If none exists, all three directives report `Cannot find file: X`, where `X` is
-the decoded operand before leading-separator normalization. Attach the directive's
+the decoded operand. Attach the directive's
 source file and line, using the macro body location for expanded binary directives,
 and preserve macro expansion notes. Use this contract in preprocessing and both
 assembly passes; do not rely on different outer callers to supply the location.
@@ -201,8 +201,6 @@ Test:
   includes, and listing collection for labels and backslash-separated statements.
 - Include preprocessing inside macro definitions and `.if 0`; missing includes in
   inactive branches; source paths for binary directives originating in included macro text.
-- Leading backslashes and `//` stripped from operands; UNC-style operands treated
-  as relative; empty normalized operands rejected; absolute `-I` paths unaffected.
 - Matching missing-file diagnostics and directive locations across all three
   directives, including expanded macro bodies and both assembly passes.
 - For writer changes: correct entry name even if an include sorts first; source
@@ -226,5 +224,4 @@ Migration:
   with the CWD-based directory-table rules above.
 - Document removal of the entry-source-directory fallback: nested sources that
   relied on it must adjust operands or supply that directory with `-I`.
-- Document that unnamed and address-label-prefixed `.filesize` forms are errors,
-  and that leading backslashes or `//` in directive operands are stripped.
+- Document that unnamed and address-label-prefixed `.filesize` forms are errors.
