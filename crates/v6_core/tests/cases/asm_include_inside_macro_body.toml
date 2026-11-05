@@ -1,0 +1,20 @@
+# An `.include` inside a macro body is expanded while preprocessing the file
+# that defines the macro.
+
+[files]
+"main.asm" = '''
+.org $0000
+.include "macros.asm"
+emit
+'''
+"macros.asm" = '''
+.macro emit()
+.include "body.asm"
+.endmacro
+'''
+"body.asm" = '''
+.byte $77
+'''
+
+[expect]
+rom = "77"

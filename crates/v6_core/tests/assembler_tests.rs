@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use v6_core::assembler::Assembler;
 use v6_core::diagnostics::AsmError;
+use v6_core::paths::PathResolver;
 use v6_core::preprocessor::preprocess;
 use v6_core::project::CpuMode;
 
@@ -110,14 +111,18 @@ fn assemble_case(
         _ => CpuMode::I8080,
     };
     let main_path = project.root.join("main.asm");
-    let mut assembler = Assembler::new(cpu, project.root.clone());
-    assembler.quiet = case.quiet.unwrap_or(true);
-
     let include_dirs: Vec<PathBuf> = case.include_dirs.iter().map(|d| project.root.join(d)).collect();
-    let lines = preprocess(&main_path, &project.root, &include_dirs, &mut assembler.symbols, &|path| {
+    let resolver = PathResolver::new(project.root.clone(), &include_dirs);
+    let mut assembler = Assembler::new(cpu, project.root.clone(), &include_dirs);
+    assembler.quiet = case.quiet.unwrap_or(true);
+    assembler.set_entry_source(main_path.clone());
+
+    let program = preprocess(&main_path, &resolver, &mut assembler.symbols, &|path| {
         fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
     })?;
-    assembler.assemble(&lines)?;
+    assembler.original_sources = program.sources;
+    assembler.include_sites = program.includes;
+    assembler.assemble(&program.lines)?;
     Ok(assembler)
 }
 

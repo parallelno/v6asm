@@ -1,0 +1,20 @@
+# .filesize in an included file resolves relative to that file's directory
+
+[files]
+"main.asm" = '''
+.org $0100
+.include "sub/part.asm"
+.byte SIZE
+'''
+"sub/part.asm" = '''
+SIZE .filesize "data.bin"
+'''
+
+[binary_files]
+"sub/data.bin" = "AABBCC"
+
+[expect]
+rom = "03"
+
+[expect.symbols]
+SIZE = 3

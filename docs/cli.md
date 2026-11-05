@@ -15,7 +15,7 @@ v6asm --init <name>
 | `-f`, `--format <format>` | Output format: `rom` (default) or `obj` (relocatable ELF object) |
 | `-c`, `--cpu <cpu>` | Target CPU: `i8080` (default) or `z80` |
 | `-a`, `--rom-align <n>` | ROM size alignment in bytes (default: `1`; ignored in object mode) |
-| `-I`, `--include-dir <path>` | Extra directory to search for `.include` files; repeatable |
+| `-I`, `--include-dir <path>` | Extra directory to search for `.include`, etc; repeatable; relative to CWD, or absolute. |
 | `-D`, `--define <NAME[=VALUE]>` | Pre-define a symbol; `VALUE` is decimal or `0x`-prefixed hex (default `1`); repeatable |
 | `-q`, `--quiet` | Suppress `.print` output |
 | `-V`, `--verbose` | Extra diagnostics |

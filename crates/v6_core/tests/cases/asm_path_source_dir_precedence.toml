@@ -1,0 +1,23 @@
+# The containing source directory wins over -I directories and the CWD
+
+include_dirs = ["lib"]
+
+[files]
+"main.asm" = '''
+.include "sub/parent.asm"
+'''
+"sub/parent.asm" = '''
+.include "pick.asm"
+'''
+"sub/pick.asm" = '''
+.byte $AA
+'''
+"lib/pick.asm" = '''
+.byte $BB
+'''
+"pick.asm" = '''
+.byte $CC
+'''
+
+[expect]
+rom = "AA"

@@ -1,0 +1,12 @@
+# `.filesize` cannot carry an address label
+
+[files]
+"main.asm" = '''
+lbl: SIZE .filesize "blob.bin"
+'''
+
+[binary_files]
+"blob.bin" = "AA"
+
+[expect]
+error_contains = "cannot carry an address label"

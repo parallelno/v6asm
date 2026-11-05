@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use crate::diagnostics::{AsmError, AsmResult};
 use crate::expr::Expr;
 
@@ -51,6 +52,10 @@ pub struct MacroDef {
 pub struct MacroBodyLine {
     pub text: String,
     pub file: String,
+    /// Resolved path of the file that contains this body line. Kept alongside
+    /// the display path so binary directives in the body resolve relative to
+    /// the macro definition file.
+    pub source_path: PathBuf,
     pub line: usize,
     pub column_offset: usize,
 }

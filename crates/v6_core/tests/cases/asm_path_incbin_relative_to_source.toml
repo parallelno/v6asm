@@ -1,0 +1,16 @@
+# .incbin in an included file resolves relative to that file's directory
+
+[files]
+"main.asm" = '''
+.org $0100
+.include "sub/part.asm"
+'''
+"sub/part.asm" = '''
+.incbin "data.bin"
+'''
+
+[binary_files]
+"sub/data.bin" = "AABB"
+
+[expect]
+rom = "AA BB"

@@ -1,0 +1,19 @@
+# A binary directive in a macro body resolves relative to the macro's file
+
+[files]
+"main.asm" = '''
+.org $0100
+.include "lib/macros.asm"
+emit_data
+'''
+"lib/macros.asm" = '''
+.macro emit_data()
+.incbin "blob.bin"
+.endmacro
+'''
+
+[binary_files]
+"lib/blob.bin" = "0102"
+
+[expect]
+rom = "01 02"

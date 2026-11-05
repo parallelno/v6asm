@@ -16,10 +16,21 @@ Include another file inline.
 
 ```asm
 .include "file.asm"
-.include 'file.asm'
+data_start: .include "assets/data.asm"
 ```
 
-Paths are resolved relative to the including file, the main asm file, any directories passed with `-I` / `--include-dir`, or the current working directory. Includes support recursive expansion up to 16 levels.
+The path must be a double-quoted string.
+
+Relative paths are searched in this order, and the first existing file wins:
+
+1. the directory of the file containing the `.include`,
+2. each `-I` / `--include-dir` directory in command-line order,
+3. the assembler's current working directory.
+
+An absolute path is used as-is. `.incbin` and `.filesize` use the same order and
+the same string rules.
+
+Max inclusion depth is 16 levels.
 
 ## `.pragma once`
 
@@ -43,7 +54,8 @@ Files without `.pragma once` are included every time they appear in an `.include
 
 ## `.filesize`
 
-Defines a constant equal to the byte size of a given file. The path resolves relative to the project directory.
+Defines a constant equal to the byte size of a given file. The constant name is
+required before the directive, and the path resolves like `.include`.
 
 ```asm
 ROM_SIZE .filesize "out/prg.rom" ; ROM_SIZE becomes the size of prg.rom
@@ -60,7 +72,8 @@ Include raw bytes from an external file at the current address.
 .incbin "path", offset, length  ; start at offset, read length bytes
 ```
 
-Paths resolve relative to the project directory. `offset` and `length` are optional expressions (decimal, hex, or binary); omit them to start at 0 and read the entire file.
+Paths resolve like `.include`. `offset` and `length` are optional expressions
+(decimal, hex, or binary); omit them to start at 0 and read the entire file.
 
 ## `.if` / `.endif`
 

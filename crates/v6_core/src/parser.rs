@@ -208,6 +208,26 @@ pub fn parse_line(tokens: &[LocatedToken], cpu_mode: CpuMode) -> AsmResult<Vec<P
                         if dname.to_uppercase() == "FILESIZE" {
                             pos += 3;
                             let path = parse_string_arg(tokens, &mut pos)?;
+                            // `.filesize` defines a named constant. An address
+                            // label on the same statement would silently be
+                            // discarded, so reject the ambiguous form.
+                            if results.iter().any(|parsed| {
+                                matches!(parsed, ParsedLine::Label(_) | ParsedLine::LocalLabel(_))
+                            }) {
+                                return Err(AsmError::new(
+                                    "`.filesize` defines a constant and cannot carry an address label; write `NAME .filesize \"path\"`",
+                                )
+                                .with_location(
+                                    tokens
+                                        .first()
+                                        .map(|token| token.loc.clone())
+                                        .unwrap_or(SourceLocation {
+                                            file: String::new(),
+                                            line: 0,
+                                            col: 0,
+                                        }),
+                                ));
+                            }
                             results.push(ParsedLine::Directive(Directive::FileSize { name: name.clone(), path }));
                             parsed_statement = true;
                         } else if dname.to_uppercase() == "VAR" {
@@ -732,9 +752,19 @@ fn parse_directive(name: &str, tokens: &[LocatedToken], pos: &mut usize) -> AsmR
             Err(AsmError::new("Expected variable name after .var"))
         }
         "FILESIZE" => {
-            // .filesize Name, "path" - but name comes before the dot usually
-            let path = parse_string_arg(tokens, pos)?;
-            Ok(Directive::FileSize { name: String::new(), path })
+            Err(AsmError::new(
+                "`.filesize` requires a constant name before the directive: `NAME .filesize \"path\"`",
+            )
+            .with_location(
+                tokens
+                    .get(*pos)
+                    .map(|token| token.loc.clone())
+                    .unwrap_or(SourceLocation {
+                        file: String::new(),
+                        line: 0,
+                        col: 0,
+                    }),
+            ))
         }
         "SECTION" => {
             let name = parse_section_name(tokens, pos)?;

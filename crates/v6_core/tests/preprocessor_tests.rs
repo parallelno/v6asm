@@ -1,5 +1,5 @@
 use v6_core::preprocessor::{
-    parse_include_directive, parse_macro_args, parse_macro_params,
+    parse_include_statement, parse_macro_args, parse_macro_params,
     replace_param, split_leading_label, strip_multiline_comments,
 };
 
@@ -19,10 +19,17 @@ fn test_strip_multiline_preserves_newlines() {
 
 #[test]
 fn test_parse_include() {
-    assert_eq!(parse_include_directive(".include \"test.asm\""), Some("test.asm".to_string()));
-    assert_eq!(parse_include_directive(".include 'test.asm'"), Some("test.asm".to_string()));
-    assert_eq!(parse_include_directive("  .include \"test.asm\"  ; comment"), Some("test.asm".to_string()));
-    assert_eq!(parse_include_directive("mvi a, 0"), None);
+    let parsed = parse_include_statement(".include \"test.asm\"").unwrap().unwrap();
+    assert_eq!(parsed.path, "test.asm");
+
+    // Single-quoted paths are rejected now that `.include` shares the lexer's
+    // double-quoted string handling with the binary directives.
+    assert!(parse_include_statement(".include 'test.asm'").is_err());
+
+    let commented = parse_include_statement("  .include \"test.asm\"  ; comment").unwrap().unwrap();
+    assert_eq!(commented.path, "test.asm");
+
+    assert!(parse_include_statement("mvi a, 0").unwrap().is_none());
 }
 
 #[test]

@@ -1,0 +1,14 @@
+# `.include` is a preprocessing directive: a missing file inside `.if 0` is
+# still an error.
+
+[files]
+"main.asm" = '''
+.if 0
+.include "missing.asm"
+.endif
+'''
+
+[expect]
+error_contains = "Cannot find file: missing.asm"
+error_file = "main.asm"
+error_line = 2

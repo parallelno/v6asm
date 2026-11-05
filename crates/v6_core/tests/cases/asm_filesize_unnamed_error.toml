@@ -1,0 +1,12 @@
+# `.filesize` without a constant name is an error
+
+[files]
+"main.asm" = '''
+.filesize "blob.bin"
+'''
+
+[binary_files]
+"blob.bin" = "AA"
+
+[expect]
+error_contains = "requires a constant name"

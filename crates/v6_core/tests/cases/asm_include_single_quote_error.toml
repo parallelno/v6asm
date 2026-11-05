@@ -1,0 +1,14 @@
+# Single-quoted `.include` paths are rejected
+
+[files]
+"main.asm" = '''
+.include 'part.asm'
+'''
+"part.asm" = '''
+nop
+'''
+
+[expect]
+error_contains = "invalid `.include` path"
+error_line = 1
+error_file = "main.asm"

@@ -1,0 +1,17 @@
+# A missing binary file inside a macro body reports the macro definition file
+
+[files]
+"main.asm" = '''
+.include "inc.asm"
+m
+'''
+"inc.asm" = '''
+.macro m()
+.incbin "nope.bin"
+.endmacro
+'''
+
+[expect]
+error_contains = "Cannot find file: nope.bin"
+error_file = "inc.asm"
+error_line = 2

@@ -307,6 +307,7 @@ pub fn debug_sections(
     structs: &[DebugStructType],
     instances: &[DebugInstance],
     compilation_dir: &Path,
+    entry_source: Option<&Path>,
     relocate: bool,
 ) -> Vec<ExtraSection> {
     let (attributed_rows, groups) = attribute_rows(rows);
@@ -345,7 +346,13 @@ pub fn debug_sections(
         .map(|(index, file)| (file.clone(), index as u32 + 1))
         .collect();
 
-    let unit_name = files.first().cloned().unwrap_or_default();
+    // `DW_AT_name` is the entry source. It cannot be inferred from the debug
+    // records: an entry file that only includes other files emits no rows and
+    // would otherwise be replaced by whichever file sorts first.
+    let unit_name = entry_source
+        .map(|path| crate::paths::source_display(path, compilation_dir))
+        .or_else(|| files.first().cloned())
+        .unwrap_or_default();
     let comp_dir = compilation_dir.to_string_lossy().replace('\\', "/");
 
     // Abstract `DW_TAG_subprogram` DIEs: one per macro definition that was
@@ -1091,6 +1098,39 @@ mod tests {
         sections.iter().find(|section| section.name == name).unwrap()
     }
 
+    /// Line-table file entries store a basename plus a directory index; check
+    /// that sub-directory sources are paired with the right directory entry.
+    #[test]
+    fn line_table_pairs_basenames_with_directory_indices() {
+        let rows = vec![
+            row(None, 0x0000, "src/main.asm", 1, 1),
+            row(None, 0x0001, "lib/macros.asm", 2, 1),
+        ];
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), None, false);
+        let line = section(&sections, ".debug_line");
+
+        let find = |needle: &[u8]| {
+            line.data
+                .windows(needle.len())
+                .position(|window| window == needle)
+        };
+
+        // Directory zero is the compilation directory; the remaining entries
+        // are the sorted parent directories of the source files.
+        assert!(find(b"lib\0").is_some());
+        assert!(find(b"src\0").is_some());
+
+        let main_at = find(b"main.asm\0").expect("file name entry");
+        assert_eq!(line.data[main_at + b"main.asm\0".len()], 2, "src is directory 2");
+
+        let macros_at = find(b"macros.asm\0").expect("file name entry");
+        assert_eq!(
+            line.data[macros_at + b"macros.asm\0".len()],
+            1,
+            "lib is directory 1"
+        );
+    }
+
     fn initial_length(data: &[u8]) -> usize {
         u32::from_le_bytes(data[..4].try_into().unwrap()) as usize
     }
@@ -1400,7 +1440,7 @@ mod tests {
             "A_1",
             chain,
         )];
-        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), false);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), None, false);
         let abbrev = &section(&sections, ".debug_abbrev").data;
         let info = &section(&sections, ".debug_info").data;
 
@@ -1477,9 +1517,9 @@ mod tests {
             row(Some(1), 2, "src/main.asm", 9, 6),
             row(Some(0), 1, "lib/util.asm", 4, 0),
         ];
-        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:\\project"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:\\project"), None, true);
         let reversed_rows: Vec<DebugLineRow> = rows.into_iter().rev().collect();
-        let reversed = debug_sections(&reversed_rows, &[], &[], &[], Path::new("C:\\project"), true);
+        let reversed = debug_sections(&reversed_rows, &[], &[], &[], Path::new("C:\\project"), None, true);
 
         assert_eq!(sections.len(), 4);
         assert_eq!(
@@ -1518,6 +1558,7 @@ mod tests {
             &[],
             &[],
             Path::new("."),
+            None,
             false,
         );
         let line = section(&sections, ".debug_line");
@@ -1535,7 +1576,7 @@ mod tests {
             line: 12,
             value: 0x4000,
         }];
-        let sections = debug_sections(&[], &constants, &[], &[], Path::new("."), true);
+        let sections = debug_sections(&[], &constants, &[], &[], Path::new("."), None, true);
 
         assert!(section(&sections, ".debug_str").data.windows(b"ARRAY_ADDR\0".len())
             .any(|window| window == b"ARRAY_ADDR\0"));
@@ -1574,7 +1615,7 @@ mod tests {
                 value: 2,
             },
         ];
-        let sections = debug_sections(&[], &constants, &[], &[], Path::new("C:/proj"), true);
+        let sections = debug_sections(&[], &constants, &[], &[], Path::new("C:/proj"), None, true);
         let str_data = &section(&sections, ".debug_str").data;
         let info = section(&sections, ".debug_info");
         assert_eq!(info.relocs.len(), 3 /* CU strp */ + 2 /* constant strp */ + 1 /* stmt_list */ + 1 /* abbrev_offset */);
@@ -1631,7 +1672,7 @@ mod tests {
             line: 1,
             value: 1,
         }];
-        let sections = debug_sections(&[], &constants, &[], &[], Path::new("C:/proj"), false);
+        let sections = debug_sections(&[], &constants, &[], &[], Path::new("C:/proj"), None, false);
         assert!(section(&sections, ".debug_info").relocs.is_empty());
         // Raw offsets stay baked in (single-CU companions need no rebasing).
         let info = &section(&sections, ".debug_info").data;
@@ -1757,7 +1798,7 @@ mod tests {
             macro_row(Some(0), 2, 1, "main.asm", 42, ("engine/macros.asm", 305), "PAUSE_1", chain),
         ];
 
-        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), None, true);
         let line = section(&sections, ".debug_line");
         let (files, line_rows) = line_table(&line.data);
 
@@ -1795,7 +1836,7 @@ mod tests {
             chain,
         )];
 
-        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), None, true);
         let info = section(&sections, ".debug_info");
         let dies = parse_dies(&info.data, &section(&sections, ".debug_abbrev").data);
         let str_data = &section(&sections, ".debug_str").data;
@@ -1844,7 +1885,7 @@ mod tests {
             vec![outer, inner],
         )];
 
-        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), true);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), None, true);
         let dies = parse_dies(
             &section(&sections, ".debug_info").data,
             &section(&sections, ".debug_abbrev").data,
@@ -1915,7 +1956,7 @@ mod tests {
             chain,
         )];
 
-        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), false);
+        let sections = debug_sections(&rows, &[], &[], &[], Path::new("C:/proj"), None, false);
         let info = section(&sections, ".debug_info");
         assert!(info.relocs.is_empty());
         let dies = parse_dies(&info.data, &section(&sections, ".debug_abbrev").data);

@@ -1,0 +1,16 @@
+# A label before .incbin marks the start of the inserted bytes
+
+[files]
+"main.asm" = '''
+.org $0100
+buf: .incbin "blob.bin"
+'''
+
+[binary_files]
+"blob.bin" = "0102"
+
+[expect]
+rom = "01 02"
+
+[expect.symbols]
+buf = 256

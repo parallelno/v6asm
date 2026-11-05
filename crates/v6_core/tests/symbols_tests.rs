@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use v6_core::symbols::{MacroBodyLine, MacroDef, MacroParam, SymbolTable};
 
 #[test]
@@ -74,6 +76,7 @@ fn test_macro_lookup_is_case_insensitive() {
         body: vec![MacroBodyLine {
             text: "nop".to_string(),
             file: "test.asm".to_string(),
+            source_path: PathBuf::from("test.asm"),
             line: 1,
             column_offset: 0,
         }],

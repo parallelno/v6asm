@@ -76,9 +76,11 @@ control directives, data directives, `.storage`, alignment padding, and `.org`
 gaps are not breakpoint targets.
 
 - An ordinary instruction maps to its own source file and line.
-- Included files have their own line-table file entries. Paths are normalized
-  with `/` separators relative to the source project where possible, so files
-  with the same basename remain distinct.
+- `DW_AT_comp_dir` is the assembler's working directory, and `DW_AT_name` is the
+  entry source. Included files have their own line-table file entries: each entry
+  holds a basename plus a directory-table index. Relative to the compilation
+  directory when the source lies inside it and absolute otherwise. Directory
+  index zero refers to the compilation directory.
 - A loop body creates one instruction row per emitted iteration. These rows
   can share a source line while having different linked addresses. The internal
   row model retains the iteration number as expansion provenance.

@@ -1,0 +1,13 @@
+# `.Include` is still an include (exact name, case-insensitive)
+
+[files]
+"main.asm" = '''
+.org $0000
+.Include "part.asm"
+'''
+"part.asm" = '''
+.byte $11
+'''
+
+[expect]
+rom = "11"

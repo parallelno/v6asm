@@ -13,6 +13,7 @@ use v6_core::diagnostics::AsmError;
 use v6_core::object::elf::{serialize_with_extra, ExtraSection};
 use v6_core::object::section::{RelocKind, RelocTarget, SHT_PROGBITS};
 use v6_core::output::{generate_debug_companion, generate_object, generate_rom, ObjConfig, RomConfig};
+use v6_core::paths::PathResolver;
 use v6_core::preprocessor::preprocess;
 use v6_core::project::CpuMode;
 
@@ -48,14 +49,18 @@ fn assemble_obj(source: &str) -> Result<Assembler, AsmError> {
     let main_path = dir.root.join("main.asm");
     fs::write(&main_path, source).unwrap();
 
-    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone());
+    let resolver = PathResolver::new(dir.root.clone(), &[]);
+    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone(), &[]);
     asm.quiet = true;
     asm.output_format = OutputFormat::Obj;
+    asm.set_entry_source(main_path.clone());
 
-    let lines = preprocess(&main_path, &dir.root, &[], &mut asm.symbols, &|path| {
+    let program = preprocess(&main_path, &resolver, &mut asm.symbols, &|path| {
         fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
     })?;
-    asm.assemble(&lines)?;
+    asm.original_sources = program.sources;
+    asm.include_sites = program.includes;
+    asm.assemble(&program.lines)?;
     Ok(asm)
 }
 
@@ -64,13 +69,63 @@ fn assemble_rom(source: &str) -> Result<Assembler, AsmError> {
     let main_path = dir.root.join("main.asm");
     fs::write(&main_path, source).unwrap();
 
-    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone());
+    let resolver = PathResolver::new(dir.root.clone(), &[]);
+    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone(), &[]);
     asm.quiet = true;
-    let lines = preprocess(&main_path, &dir.root, &[], &mut asm.symbols, &|path| {
+    asm.set_entry_source(main_path.clone());
+    let program = preprocess(&main_path, &resolver, &mut asm.symbols, &|path| {
         fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
     })?;
-    asm.assemble(&lines)?;
+    asm.original_sources = program.sources;
+    asm.include_sites = program.includes;
+    asm.assemble(&program.lines)?;
     Ok(asm)
+}
+
+#[test]
+fn debug_unit_name_keeps_the_entry_source() {
+    let dir = TempDir::new();
+    let main_path = dir.root.join("main.asm");
+    fs::create_dir_all(dir.root.join("aaa")).unwrap();
+    fs::write(&main_path, ".include \"aaa/early.asm\"\n").unwrap();
+    fs::write(dir.root.join("aaa/early.asm"), "nop\n").unwrap();
+
+    let resolver = PathResolver::new(dir.root.clone(), &[]);
+    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone(), &[]);
+    asm.quiet = true;
+    asm.output_format = OutputFormat::Obj;
+    asm.set_entry_source(main_path.clone());
+    let program = preprocess(&main_path, &resolver, &mut asm.symbols, &|path| {
+        fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
+    })
+    .unwrap();
+    asm.assemble(&program.lines).unwrap();
+
+    let sections = v6_core::object::dwarf::debug_sections(
+        &asm.debug_rows,
+        &[],
+        &[],
+        &[],
+        asm.compilation_dir(),
+        asm.entry_source(),
+        true,
+    );
+    let strings = sections.iter().find(|s| s.name == ".debug_str").unwrap();
+
+    // `.debug_str` starts with the producer, then `DW_AT_name`, then
+    // `DW_AT_comp_dir` ("aaa/early.asm" sorts before "main.asm", so the entry
+    // source must be passed explicitly rather than inferred).
+    let producer_end = strings.data.iter().position(|b| *b == 0).unwrap();
+    let rest = &strings.data[producer_end + 1..];
+    let name_end = rest.iter().position(|b| *b == 0).unwrap();
+    assert_eq!(&rest[..name_end], b"main.asm");
+
+    let after_name = &rest[name_end + 1..];
+    let comp_dir_end = after_name.iter().position(|b| *b == 0).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&after_name[..comp_dir_end]),
+        dir.root.to_string_lossy().replace('\\', "/")
+    );
 }
 
 /// Find the relocation in section 0 whose fixup offset equals `offset`.
@@ -151,14 +206,16 @@ fn debug_rows_preserve_nested_include_paths_and_optional_sections() {
     fs::write(dir.root.join("dir_a/nested.asm"), "hlt\n").unwrap();
     fs::write(dir.root.join("dir_b/shared.asm"), "nop\n").unwrap();
 
-    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone());
+    let resolver = PathResolver::new(dir.root.clone(), &[]);
+    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone(), &[]);
     asm.quiet = true;
     asm.output_format = OutputFormat::Obj;
-    let lines = preprocess(&main_path, &dir.root, &[], &mut asm.symbols, &|path| {
+    asm.set_entry_source(main_path.clone());
+    let program = preprocess(&main_path, &resolver, &mut asm.symbols, &|path| {
         fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
     })
     .unwrap();
-    asm.assemble(&lines).unwrap();
+    asm.assemble(&program.lines).unwrap();
 
     let files: Vec<_> = asm.debug_rows.iter().map(|row| row.file.as_str()).collect();
     assert!(files.contains(&"dir_a/nested.asm"));
@@ -633,7 +690,7 @@ fn optional_debug_regions_include_unreferenced_entries_and_relocations() {
     let region = &asm.debug_function_regions[0];
     assert_eq!((region.start, region.end), (0, 2));
     let mut debug = v6_core::object::dwarf::debug_sections(
-        &asm.debug_rows, &[], &[], &[], asm.project_dir(), true);
+        &asm.debug_rows, &[], &[], &[], asm.compilation_dir(), asm.entry_source(), true);
     v6_core::object::dwarf::add_function_regions(&mut debug, &asm, true);
     let info = debug.iter().find(|s| s.name == ".debug_info").unwrap();
     assert!(info.data.windows(6).any(|w| w == b"first\0"));
@@ -1169,13 +1226,15 @@ fn pack_storage_uses_preceding_constant_inside_conditional() -> Result<(), AsmEr
     )
     .unwrap();
 
-    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone());
+    let resolver = PathResolver::new(dir.root.clone(), &[]);
+    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone(), &[]);
     asm.quiet = true;
     asm.output_format = OutputFormat::Obj;
-    let lines = preprocess(&main_path, &dir.root, &[], &mut asm.symbols, &|path| {
+    asm.set_entry_source(main_path.clone());
+    let program = preprocess(&main_path, &resolver, &mut asm.symbols, &|path| {
         fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
     })?;
-    asm.assemble(&lines)?;
+    asm.assemble(&program.lines)?;
 
     assert_eq!(asm.symbols.resolve("V6_GC_TASK_SPS_LEN"), Some(28));
     let packed = asm

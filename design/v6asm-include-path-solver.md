@@ -1,6 +1,6 @@
 # v6asm directive path resolution
 
-**Status:** Draft; not implemented.
+**Status:** Implemented.
 **Repository:** `C:\Work\Programming\v6asm`.
 
 ## 1. Goal

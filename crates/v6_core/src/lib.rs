@@ -11,3 +11,4 @@ pub mod output;
 pub mod diagnostics;
 pub mod fdd;
 pub mod object;
+pub mod paths;

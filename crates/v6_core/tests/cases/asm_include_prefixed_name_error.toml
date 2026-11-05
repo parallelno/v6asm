@@ -1,0 +1,12 @@
+# `.includefoo` is not an include; it is an unknown directive
+
+[files]
+"main.asm" = '''
+.includefoo "part.asm"
+'''
+"part.asm" = '''
+nop
+'''
+
+[expect]
+error_contains = "Unknown directive"

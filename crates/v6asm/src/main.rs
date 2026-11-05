@@ -7,6 +7,7 @@ use clap::{CommandFactory, Parser};
 use v6_core::assembler::{Assembler, OutputFormat};
 use v6_core::diagnostics::{AsmError, AsmResult};
 use v6_core::output::{generate_listing, generate_rom, rom_start_address, write_debug_companion, write_listing, write_object, write_rom, ObjConfig, RomConfig};
+use v6_core::paths::PathResolver;
 use v6_core::preprocessor;
 use v6_core::project::CpuMode;
 use v6_core::symbols::SymbolTable;
@@ -74,7 +75,7 @@ struct Cli {
     #[arg(long = "debug-elf")]
     debug_elf: Option<PathBuf>,
 
-    /// Additional include search directories
+    /// Additional directories searched for .include, .incbin, and .filesize paths
     #[arg(short = 'I', long = "include-dir")]
     include_dirs: Vec<PathBuf>,
 
@@ -336,7 +337,16 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
         return Err(AsmError::new(format!("Source file not found: {}", source_path.display())));
     }
 
-    let source_dir = source_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // Path operands resolve against the invocation's working directory, not
+    // the entry file's directory.
+    let compilation_dir = std::env::current_dir()
+        .map_err(|e| AsmError::new(format!("Cannot determine current directory: {}", e)))?;
+    let entry_source = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else {
+        compilation_dir.join(source_path)
+    };
+    let resolver = PathResolver::new(compilation_dir.clone(), &cli.include_dirs);
 
     // Preprocess sources
     let mut symbols = SymbolTable::new();
@@ -352,10 +362,7 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
         std::fs::read_to_string(path)
             .map_err(|e| AsmError::new(format!("Cannot read {}: {}", path.display(), e)))
     };
-    let lines = preprocessor::preprocess(source_path, &source_dir, &cli.include_dirs, &mut symbols, &read_file_fn)?;
-
-    // Collect original sources for listing
-    let original_sources = preprocessor::collect_original_sources(source_path, &source_dir, &cli.include_dirs, &read_file_fn)?;
+    let program = preprocessor::preprocess(&entry_source, &resolver, &mut symbols, &read_file_fn)?;
 
     // Assemble
     let cpu_mode = match cli.cpu.as_str() {
@@ -378,13 +385,15 @@ fn cmd_assemble(source_path: &Path, cli: &Cli) -> Result<(), AsmError> {
         return Err(AsmError::new("--debug-elf is only supported with ROM output"));
     }
 
-    let mut asm = Assembler::new(cpu_mode, source_dir.clone());
+    let mut asm = Assembler::new(cpu_mode, compilation_dir, &cli.include_dirs);
+    asm.set_entry_source(entry_source);
     asm.quiet = cli.quiet;
     asm.output_format = output_format;
     asm.symbols = symbols;
-    asm.original_sources = original_sources;
+    asm.original_sources = program.sources;
+    asm.include_sites = program.includes;
 
-    asm.assemble(&lines)?;
+    asm.assemble(&program.lines)?;
 
     if output_format == OutputFormat::Obj {
         if cli.rom_align > 1 {

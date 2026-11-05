@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use crate::diagnostics::{AsmError, AsmResult};
+use crate::paths::{decode_quoted_path, source_display, PathResolver};
 use crate::symbols::{MacroBodyLine, MacroDef, MacroParam, SymbolTable};
 
 const MAX_INCLUDE_DEPTH: usize = 16;
@@ -19,7 +20,12 @@ pub struct OriginalSource {
 /// A preprocessed source line with metadata
 #[derive(Debug, Clone)]
 pub struct SourceLine {
+    /// Shortened path used for diagnostics, listings, and debug metadata.
     pub file: String,
+    /// Absolute path of the source file whose text this line carries. Retained
+    /// separately from `file` because binary directives need the containing
+    /// file's directory even when the display path is shortened.
+    pub source_path: PathBuf,
     pub line_num: usize,
     /// Zero-based offset of this split statement within its physical line.
     pub column_offset: usize,
@@ -76,65 +82,75 @@ pub struct ExpansionSite {
 }
 
 /// Read and preprocess source files
+/// One `.include` occurrence found while preprocessing.
+///
+/// Listing generation consumes these occurrences instead of scanning source
+/// text again, so label prefixes, backslash-separated statements, and
+/// include-once skips cannot desynchronize the listing from what was assembled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeSite {
+    /// Index into [`PreprocessedProgram::sources`] of the containing file.
+    pub parent: usize,
+    /// One-based physical line number within the containing file.
+    pub line_num: usize,
+    /// Zero-based offset of the statement within that physical line.
+    pub column_offset: usize,
+    /// Index into [`PreprocessedProgram::sources`] of the included file, or
+    /// `None` when include-once handling skipped this occurrence.
+    pub child: Option<usize>,
+}
+
+/// Result of preprocessing: assembly lines plus the provenance needed by the
+/// listing writer.
+#[derive(Debug, Clone, Default)]
+pub struct PreprocessedProgram {
+    /// Expanded source lines handed to the assembler.
+    pub lines: Vec<SourceLine>,
+    /// Original file contents in depth-first include order (including the entry
+    /// source and repeated expansions).
+    pub sources: Vec<OriginalSource>,
+    /// Include occurrences in traversal order.
+    pub includes: Vec<IncludeSite>,
+}
+
 pub fn preprocess(
-    main_file: &Path,
-    project_dir: &Path,
-    include_dirs: &[PathBuf],
+    entry_source: &Path,
+    resolver: &PathResolver,
     symbols: &mut SymbolTable,
     read_file: &dyn Fn(&Path) -> AsmResult<String>,
-) -> AsmResult<Vec<SourceLine>> {
-    let content = read_file(main_file)?;
-    let file_name = path_relative_to(main_file, project_dir);
-
-    // Step 1: Strip multi-line comments
-    let content = strip_multiline_comments(&content);
-
-    // Step 2: Load and inline includes, collect macros
-    let raw_lines = content_to_lines(&content, &file_name);
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    // The main file itself is not subject to .pragma once deduplication —
-    // only included files are. So we don't insert main_file into `seen` here.
-    // If the main file declares .setting force_once, propagate to all its includes.
-    let main_force_once = scan_force_once_setting(&content);
-    let mut expanded = expand_includes(raw_lines, main_file, project_dir, include_dirs, read_file, 0, &mut seen, main_force_once)?;
-
-    // Step 3: Collect macro definitions
-    collect_macros(&mut expanded, symbols)?;
-
-    // Step 4: Expand macros, loops, and conditionals
-    // (This will be done during assembly passes since .if/.loop need expression evaluation)
-
-    Ok(expanded)
-}
-
-fn path_relative_to(file: &Path, base: &Path) -> String {
-    // A relative path is already relative to the current working directory, so
-    // keep it intact. This yields a path that is clickable from where the
-    // assembler was invoked and reflects the include search (e.g. the `-I`
-    // directory) used to locate the file.
-    let rel = if file.is_relative() {
-        file.to_string_lossy().to_string()
-    } else if let Ok(stripped) = file.strip_prefix(base) {
-        // Absolute path under the project directory: make it relative.
-        stripped.to_string_lossy().to_string()
-    } else {
-        // Absolute path elsewhere: fall back to the bare file name.
-        file.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default()
+) -> AsmResult<PreprocessedProgram> {
+    let content = read_file(entry_source)?;
+    let mut expansion = IncludeExpansion {
+        resolver,
+        read_file,
+        seen: HashSet::new(),
+        sources: Vec::new(),
+        includes: Vec::new(),
     };
-    // Normalize separators so the path renders consistently (and clickably)
-    // regardless of how each include path fragment was written.
-    rel.replace('\\', "/")
+
+    // The entry source is not subject to include-once deduplication — only
+    // included files are, so it is deliberately absent from `seen`. A
+    // `.setting force_once` in the entry source propagates to its includes.
+    let entry_force_once = scan_force_once_setting(&content);
+    let (mut lines, _) = expansion.expand_file(entry_source, content, 0, entry_force_once)?;
+
+    collect_macros(&mut lines, symbols)?;
+
+    Ok(PreprocessedProgram {
+        lines,
+        sources: expansion.sources,
+        includes: expansion.includes,
+    })
 }
 
-fn content_to_lines(content: &str, file_name: &str) -> Vec<SourceLine> {
+fn content_to_lines(content: &str, file_name: &str, source_path: &Path) -> Vec<SourceLine> {
     let mut result = Vec::new();
     for (i, line) in content.lines().enumerate() {
         let line_num = i + 1;
         for (part, column_offset) in split_on_backslash_with_offsets(line) {
             result.push(SourceLine {
                 file: file_name.to_string(),
+                source_path: source_path.to_path_buf(),
                 line_num,
                 column_offset,
                 text: part,
@@ -322,93 +338,201 @@ fn scan_force_once_setting(content: &str) -> bool {
     false
 }
 
-fn expand_includes(
-    lines: Vec<SourceLine>,
-    current_file: &Path,
-    project_dir: &Path,
-    include_dirs: &[PathBuf],
-    read_file: &dyn Fn(&Path) -> AsmResult<String>,
-    depth: usize,
-    seen: &mut HashSet<PathBuf>,
-    force_once_scope: bool,
-) -> AsmResult<Vec<SourceLine>> {
-    if depth >= MAX_INCLUDE_DEPTH {
-        return Err(AsmError::new(format!("Include depth exceeded {} levels", MAX_INCLUDE_DEPTH)));
-    }
+/// State carried through recursive include expansion.
+struct IncludeExpansion<'a> {
+    resolver: &'a PathResolver,
+    read_file: &'a dyn Fn(&Path) -> AsmResult<String>,
+    /// Canonical paths already expanded under include-once handling.
+    seen: HashSet<PathBuf>,
+    sources: Vec<OriginalSource>,
+    includes: Vec<IncludeSite>,
+}
 
-    let mut result = Vec::new();
-    let current_dir = current_file.parent().unwrap_or(project_dir);
-
-    for line in &lines {
-        let trimmed = line.text.trim();
-
-        // Skip the `.pragma once` directive itself — it's a preprocessor hint,
-        // not assembly output.
-        if trimmed.eq_ignore_ascii_case(".pragma once") {
-            continue;
+impl IncludeExpansion<'_> {
+    /// Expand `source_path`'s content, returning its assembly lines and its
+    /// index in [`IncludeExpansion::sources`].
+    fn expand_file(
+        &mut self,
+        source_path: &Path,
+        content: String,
+        depth: usize,
+        force_once_scope: bool,
+    ) -> AsmResult<(Vec<SourceLine>, usize)> {
+        if depth >= MAX_INCLUDE_DEPTH {
+            return Err(AsmError::new(format!(
+                "Include depth exceeded {} levels",
+                MAX_INCLUDE_DEPTH
+            )));
         }
 
-        // Check for .include "file"
-        if let Some(path_str) = parse_include_directive(trimmed) {
-            let include_path = resolve_include_path(&path_str, current_dir, project_dir, include_dirs)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+        let content = strip_multiline_comments(&content);
+        let file_name = source_display(source_path, self.resolver.compilation_dir());
+        let source_index = self.sources.len();
+        self.sources.push(OriginalSource {
+            file: file_name.clone(),
+            lines: content.lines().map(|line| line.to_string()).collect(),
+        });
+
+        let mut result = Vec::new();
+        let source_dir = source_path.parent().unwrap_or(self.resolver.compilation_dir());
+
+        for line in content_to_lines(&content, &file_name, source_path) {
+            // Skip the `.pragma once` directive itself — it's a preprocessor
+            // hint, not assembly output.
+            if line.text.trim().eq_ignore_ascii_case(".pragma once") {
+                continue;
+            }
+
+            let include = parse_include_statement(&line.text)
+                .map_err(|message| AsmError::new(message).ensure_location(&file_name, line.line_num))?;
+            let Some(include) = include else {
+                result.push(line);
+                continue;
+            };
+
+            // A label on the include directive marks the start of the included
+            // block, so define it at the current address before the child's
+            // lines are assembled.
+            if let Some(label) = &include.label {
+                result.push(SourceLine {
+                    file: file_name.clone(),
+                    source_path: source_path.to_path_buf(),
+                    line_num: line.line_num,
+                    column_offset: line.column_offset,
+                    text: label.spelling(),
+                    macro_context: None,
+                    expansion: Vec::new(),
+                    origin: None,
+                });
+            }
+
+            let include_path = self
+                .resolver
+                .resolve(&include.path, source_dir)
+                .map_err(|e| e.ensure_location(&file_name, line.line_num))?;
 
             // Canonicalize so that different relative spellings of the same
             // file compare equal.
-            let canonical = include_path.canonicalize().unwrap_or_else(|_| include_path.clone());
+            let canonical = include_path
+                .canonicalize()
+                .unwrap_or_else(|_| include_path.clone());
 
-            let content = read_file(&include_path)
-                .map_err(|e| e.ensure_location(&line.file, line.line_num))?;
+            let child_content = (self.read_file)(&include_path)
+                .map_err(|e| e.ensure_location(&file_name, line.line_num))?;
 
-            // Determine whether this file should be included at most once.
             // True wins: force_once inherited from the parent scope, the
-            // file's own .pragma once, or a .setting force_once, true
-            // anywhere inside the file.
-            let file_has_force_once = scan_force_once_setting(&content);
-            let should_deduplicate = force_once_scope
-                || has_pragma_once(&content)
-                || file_has_force_once;
+            // file's own .pragma once, or a .setting force_once anywhere
+            // inside the file.
+            let file_has_force_once = scan_force_once_setting(&child_content);
+            let should_deduplicate =
+                force_once_scope || has_pragma_once(&child_content) || file_has_force_once;
+
+            let site_index = self.includes.len();
+            self.includes.push(IncludeSite {
+                parent: source_index,
+                line_num: line.line_num,
+                column_offset: line.column_offset,
+                child: None,
+            });
 
             if should_deduplicate {
-                if seen.contains(&canonical) {
+                if self.seen.contains(&canonical) {
                     continue;
                 }
-                seen.insert(canonical);
+                self.seen.insert(canonical);
             }
 
             // Propagate force_once to the included file's own sub-includes.
             let child_force_once_scope = force_once_scope || file_has_force_once;
+            let (child_lines, child_index) = self.expand_file(
+                &include_path,
+                child_content,
+                depth + 1,
+                child_force_once_scope,
+            )?;
+            self.includes[site_index].child = Some(child_index);
+            result.extend(child_lines);
+        }
 
-            let content = strip_multiline_comments(&content);
-            let file_name = path_relative_to(&include_path, project_dir);
-            let inc_lines = content_to_lines(&content, &file_name);
-            let expanded = expand_includes(inc_lines, &include_path, project_dir, include_dirs, read_file, depth + 1, seen, child_force_once_scope)?;
-            result.extend(expanded);
+        Ok((result, source_index))
+    }
+}
+
+/// A leading label definition attached to an `.include` directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeLabel {
+    /// `true` for `@name:` (a local label).
+    pub is_local: bool,
+    pub name: String,
+}
+
+impl IncludeLabel {
+    /// The statement text that defines this label.
+    pub fn spelling(&self) -> String {
+        if self.is_local {
+            format!("@{}:", self.name)
         } else {
-            result.push(line.clone());
+            format!("{}:", self.name)
+        }
+    }
+}
+
+/// A parsed `.include` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeStatement {
+    /// Address label defined at the start of the included block, if any.
+    pub label: Option<IncludeLabel>,
+    /// Decoded path operand.
+    pub path: String,
+}
+
+/// Recognize an `.include` statement.
+///
+/// Returns `Ok(None)` when the statement is not an include. A statement whose
+/// directive name is exactly `include` (case-insensitive) but whose operand is
+/// missing or malformed returns `Err` with a syntax message, so it can never be
+/// silently ignored by the assembler.
+pub fn parse_include_statement(line: &str) -> Result<Option<IncludeStatement>, String> {
+    let line = strip_single_line_comment(line);
+    let mut rest = line.trim_start();
+
+    let mut label = None;
+    if let Some(leading) = split_leading_label(rest) {
+        if !leading.name.is_empty() {
+            label = Some(IncludeLabel {
+                is_local: leading.is_local,
+                name: leading.name.to_string(),
+            });
+            rest = leading.rest.trim_start();
         }
     }
 
-    Ok(result)
-}
-
-pub fn parse_include_directive(line: &str) -> Option<String> {
-    // Strip single-line comments first
-    let line = strip_single_line_comment(line);
-    let trimmed = line.trim();
-
-    if !trimmed.starts_with(".include") && !trimmed.starts_with(".INCLUDE") {
-        return None;
+    let Some(after_dot) = rest.strip_prefix('.') else {
+        return Ok(None);
+    };
+    let name_end = after_dot
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(after_dot.len());
+    let name = &after_dot[..name_end];
+    if !name.eq_ignore_ascii_case("include") {
+        return Ok(None);
     }
 
-    let rest = trimmed[8..].trim();
-    if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
-        Some(rest[1..rest.len() - 1].to_string())
-    } else if rest.starts_with('\'') && rest.ends_with('\'') && rest.len() >= 2 {
-        Some(rest[1..rest.len() - 1].to_string())
-    } else {
-        None
+    let operand = after_dot[name_end..].trim_start();
+    if operand.is_empty() {
+        return Err("`.include` requires a double-quoted path".to_string());
     }
+    let (path, remaining) = decode_quoted_path(operand)
+        .map_err(|reason| format!("invalid `.include` path: {}", reason))?;
+    let remaining = strip_single_line_comment(&remaining);
+    if !remaining.trim().is_empty() {
+        return Err(format!(
+            "unexpected text after `.include` path: {}",
+            remaining.trim()
+        ));
+    }
+
+    Ok(Some(IncludeStatement { label, path }))
 }
 
 fn strip_single_line_comment(line: &str) -> String {
@@ -444,32 +568,6 @@ fn strip_single_line_comment(line: &str) -> String {
     result
 }
 
-fn resolve_include_path(path_str: &str, current_dir: &Path, project_dir: &Path, include_dirs: &[PathBuf]) -> AsmResult<PathBuf> {
-    // Try relative to current file
-    let p = current_dir.join(path_str);
-    if p.exists() {
-        return Ok(p);
-    }
-    // Try relative to project dir
-    let p = project_dir.join(path_str);
-    if p.exists() {
-        return Ok(p);
-    }
-    // Try each include directory in order
-    for dir in include_dirs {
-        let p = dir.join(path_str);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    // Try CWD
-    let p = PathBuf::from(path_str);
-    if p.exists() {
-        return Ok(p);
-    }
-    Err(AsmError::new(format!("Cannot find include file: {}", path_str)))
-}
-
 fn collect_macros(lines: &mut Vec<SourceLine>, symbols: &mut SymbolTable) -> AsmResult<()> {
     let mut i = 0;
     let mut new_lines = Vec::new();
@@ -500,6 +598,7 @@ fn collect_macros(lines: &mut Vec<SourceLine>, symbols: &mut SymbolTable) -> Asm
                 macro_body.push(MacroBodyLine {
                     text: lines[i].text.clone(),
                     file: lines[i].file.clone(),
+                    source_path: lines[i].source_path.clone(),
                     line: lines[i].line_num,
                     // Body lines are stored after `\` statement splitting, so
                     // this is the statement's zero-based start within its
@@ -656,6 +755,10 @@ pub fn expand_macro(
         });
         body_text.push(SourceLine {
             file: call_source.file.clone(),
+            // Keep the body statement's own resolved source path: binary
+            // directives written in a macro body resolve relative to the file
+            // that defines the macro, not the invocation site.
+            source_path: body_line.source_path.clone(),
             line_num: call_source.line_num,
             // The expanded text is the macro body statement, so its column
             // offset must be that statement's own offset within the macro
@@ -920,55 +1023,6 @@ pub fn parse_macro_args(s: &str) -> Vec<String> {
     args
 }
 
-/// Collect original source files in listing order (main file, then includes as they appear).
-/// Each file is stored with its full text lines. The order matches how they appear in the source.
-pub fn collect_original_sources(
-    main_file: &Path,
-    project_dir: &Path,
-    include_dirs: &[PathBuf],
-    read_file: &dyn Fn(&Path) -> AsmResult<String>,
-) -> AsmResult<Vec<OriginalSource>> {
-    let mut sources = Vec::new();
-    collect_sources_recursive(main_file, project_dir, include_dirs, read_file, &mut sources, 0)?;
-    Ok(sources)
-}
-
-fn collect_sources_recursive(
-    file: &Path,
-    project_dir: &Path,
-    include_dirs: &[PathBuf],
-    read_file: &dyn Fn(&Path) -> AsmResult<String>,
-    sources: &mut Vec<OriginalSource>,
-    depth: usize,
-) -> AsmResult<()> {
-    if depth >= MAX_INCLUDE_DEPTH {
-        return Ok(());
-    }
-
-    let content = read_file(file)?;
-    let content = strip_multiline_comments(&content);
-    let file_name = path_relative_to(file, project_dir);
-    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let current_dir = file.parent().unwrap_or(project_dir);
-
-    // Store this file
-    sources.push(OriginalSource {
-        file: file_name,
-        lines: lines.clone(),
-    });
-
-    // Recurse into includes
-    for line in &lines {
-        if let Some(path_str) = parse_include_directive(line.trim()) {
-            if let Ok(include_path) = resolve_include_path(&path_str, current_dir, project_dir, include_dirs) {
-                collect_sources_recursive(&include_path, project_dir, include_dirs, read_file, sources, depth + 1)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,7 +1080,7 @@ mod tests {
 
     #[test]
     fn content_to_lines_preserves_line_num_across_split() {
-        let out = content_to_lines("nop\nmvi a,1 \\ mvi b,2\nret", "test.asm");
+        let out = content_to_lines("nop\nmvi a,1 \\ mvi b,2\nret", "test.asm", Path::new("test.asm"));
         assert_eq!(out.len(), 4);
         assert_eq!(out[0].line_num, 1);
         assert_eq!(out[0].text, "nop");
@@ -1036,5 +1090,78 @@ mod tests {
         assert_eq!(out[2].text, " mvi b,2");
         assert_eq!(out[3].line_num, 3);
         assert_eq!(out[3].text, "ret");
+    }
+
+    #[test]
+    fn include_statement_requires_exact_name_and_double_quotes() {
+        let parsed = parse_include_statement(".Include \"sub/part.asm\"").unwrap().unwrap();
+        assert_eq!(parsed.path, "sub/part.asm");
+        assert!(parsed.label.is_none());
+
+        assert!(parse_include_statement(".includefoo \"x.asm\"").unwrap().is_none());
+        assert!(parse_include_statement(".include 'x.asm'").is_err());
+        assert!(parse_include_statement(".include").is_err());
+        assert!(parse_include_statement(".include \"x.asm\" extra").is_err());
+    }
+
+    #[test]
+    fn include_statement_keeps_leading_label() {
+        let parsed = parse_include_statement("  data_start: .include \"data.asm\"").unwrap().unwrap();
+        assert_eq!(parsed.path, "data.asm");
+        assert_eq!(
+            parsed.label,
+            Some(IncludeLabel { is_local: false, name: "data_start".to_string() })
+        );
+
+        let local = parse_include_statement("@loop: .include \"body.asm\"").unwrap().unwrap();
+        assert_eq!(
+            local.label,
+            Some(IncludeLabel { is_local: true, name: "loop".to_string() })
+        );
+    }
+
+    #[test]
+    fn preprocess_records_sources_and_include_sites() {
+        let dir = std::env::temp_dir().join(format!(
+            "v6asm-preprocess-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("main.asm"),
+            "start: .include \"part.asm\"\n.include \"once.asm\"\n.include \"once.asm\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("part.asm"), ".byte $11\n").unwrap();
+        std::fs::write(dir.join("once.asm"), ".pragma once\n.byte $22\n").unwrap();
+
+        let resolver = PathResolver::new(dir.clone(), &[]);
+        let mut symbols = SymbolTable::new();
+        let program = preprocess(&dir.join("main.asm"), &resolver, &mut symbols, &|path| {
+            std::fs::read_to_string(path)
+                .map_err(|e| AsmError::new(format!("Cannot read {}: {}", path.display(), e)))
+        })
+        .unwrap();
+
+        // Source text is collected in depth-first expansion order.
+        let files: Vec<&str> = program.sources.iter().map(|source| source.file.as_str()).collect();
+        assert_eq!(files, vec!["main.asm", "part.asm", "once.asm"]);
+
+        // The label keeps its own line; the included block follows it.
+        let texts: Vec<&str> = program.lines.iter().map(|line| line.text.trim()).collect();
+        assert_eq!(texts, vec!["start:", ".byte $11", ".byte $22"]);
+        assert_eq!(program.lines[0].source_path, dir.join("main.asm"));
+        assert_eq!(program.lines[1].source_path, dir.join("part.asm"));
+
+        // The repeated `.pragma once` include expands once and is skipped the
+        // second time, but both occurrences are still recorded.
+        assert_eq!(program.includes.len(), 3);
+        assert_eq!(program.includes[0].child, Some(1));
+        assert_eq!(program.includes[1].child, Some(2));
+        assert_eq!(program.includes[2].child, None);
+        assert_eq!(program.includes[2].line_num, 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

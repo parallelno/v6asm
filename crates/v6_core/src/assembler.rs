@@ -7,8 +7,9 @@ use crate::expr::{eval_expr, eval_expr_reloc, parse_expression, ByteOp, Expr, Re
 use crate::instructions::{encode_instruction, ParsedOperand};
 use crate::lexer::{tokenize_line, LocatedToken, Token};
 use crate::object::section::{Reloc, RelocKind, Section};
+use crate::paths::{source_display, PathResolver};
 use crate::parser::{self, Directive, ParsedLine, PackKind, PrintArg, TextItem};
-use crate::preprocessor::{SourceLine, OriginalSource, ExpansionKind, MacroInvocationResult, expand_macro, parse_macro_invocation, split_leading_label};
+use crate::preprocessor::{IncludeSite, SourceLine, OriginalSource, ExpansionKind, MacroInvocationResult, expand_macro, parse_macro_invocation, split_leading_label};
 use crate::project::CpuMode;
 use crate::symbols::{StructDef, StructField, StructFieldType, SymbolTable};
 
@@ -254,6 +255,8 @@ pub struct Assembler {
     pub debug_rows: Vec<DebugLineRow>,
     pub debug_function_regions: Vec<DebugFunctionRegion>,
     pub original_sources: Vec<OriginalSource>,
+    /// Include occurrences recorded by preprocessing, consumed by the listing writer.
+    pub include_sites: Vec<IncludeSite>,
     pub pc: u16,
     pub cpu_mode: CpuMode,
     pub encoding: Encoding,
@@ -264,7 +267,11 @@ pub struct Assembler {
     pub output_format: OutputFormat,
     /// Object-mode state (only meaningful when `output_format == Obj`).
     pub obj: ObjectState,
-    project_dir: PathBuf,
+    /// Shared directive path search configuration (compilation directory and
+    /// include directories).
+    resolver: PathResolver,
+    /// Absolute path of the entry source, used for `DW_AT_name`.
+    entry_source: Option<PathBuf>,
 
     // Tracking for .optional blocks
     _optional_stack: Vec<OptionalBlock>,
@@ -312,7 +319,10 @@ struct OptionalBlockInfo {
 }
 
 impl Assembler {
-    pub fn new(cpu_mode: CpuMode, project_dir: PathBuf) -> Self {
+    /// Create an assembler whose directive paths resolve against
+    /// `compilation_dir` (the invocation's working directory) and the ordered
+    /// `include_dirs`.
+    pub fn new(cpu_mode: CpuMode, compilation_dir: PathBuf, include_dirs: &[PathBuf]) -> Self {
         Self {
             symbols: SymbolTable::new(),
             output: OutputBuffer::new(),
@@ -320,6 +330,7 @@ impl Assembler {
             debug_rows: Vec::new(),
             debug_function_regions: Vec::new(),
             original_sources: Vec::new(),
+            include_sites: Vec::new(),
             pc: 0,
             cpu_mode,
             encoding: Encoding::default(),
@@ -328,7 +339,8 @@ impl Assembler {
             quiet: false,
             output_format: OutputFormat::Rom,
             obj: ObjectState::new(),
-            project_dir,
+            resolver: PathResolver::new(compilation_dir, include_dirs),
+            entry_source: None,
             _optional_stack: Vec::new(),
             _optional_blocks: Vec::new(),
             pending_align: 1,
@@ -341,8 +353,25 @@ impl Assembler {
         }
     }
 
-    pub fn project_dir(&self) -> &Path {
-        &self.project_dir
+    /// Compilation directory: the invocation's working directory. Used as
+    /// `DW_AT_comp_dir` and as the base for shortening source paths.
+    pub fn compilation_dir(&self) -> &Path {
+        self.resolver.compilation_dir()
+    }
+
+    /// Path resolver shared with preprocessing.
+    pub fn resolver(&self) -> &PathResolver {
+        &self.resolver
+    }
+
+    /// Entry source used for `DW_AT_name`.
+    pub fn entry_source(&self) -> Option<&Path> {
+        self.entry_source.as_deref()
+    }
+
+    /// Record the entry source path for debug metadata.
+    pub fn set_entry_source(&mut self, entry_source: PathBuf) {
+        self.entry_source = Some(entry_source);
     }
 
     /// Assemble preprocessed source lines (two-pass)
@@ -680,14 +709,16 @@ impl Assembler {
                     self.advance_pc(size as u16);
                 }
                 ParsedLine::Directive(dir) => {
-                    self.process_directive_pass1(dir, line.diag_file(), line.diag_line())?;
+                    self.process_directive_pass1(dir, line)?;
                 }
             }
         }
         Ok(())
     }
 
-    fn process_directive_pass1(&mut self, dir: &Directive, file: &str, line_num: usize) -> AsmResult<()> {
+    fn process_directive_pass1(&mut self, dir: &Directive, line: &SourceLine) -> AsmResult<()> {
+        let file = line.diag_file();
+        let line_num = line.diag_line();
         match dir {
             Directive::Org(expr) => {
                 if self.output_format == OutputFormat::Obj {
@@ -770,18 +801,18 @@ impl Assembler {
             }
             Directive::IncBin { path, offset, length } => {
                 // For pass 1 we need to know the size
-                let resolved = self.resolve_file_path(path)?;
+                let resolved = self.resolve_directive_file(path, line)?;
                 let file_len = std::fs::metadata(&resolved)
-                    .map_err(|e| AsmError::new(format!("Cannot read {}: {}", path, e)))?
+                    .map_err(|e| self.directive_io_error("Cannot read", path, &resolved, &e, line))?
                     .len() as usize;
                 let off = offset.as_ref().map(|e| self.eval_expr(e).unwrap_or(0) as usize).unwrap_or(0);
                 let len = length.as_ref().map(|e| self.eval_expr(e).unwrap_or(0) as usize).unwrap_or(file_len - off);
                 self.advance_pc(len as u16);
             }
             Directive::FileSize { name, path } => {
-                let resolved = self.resolve_file_path(path)?;
+                let resolved = self.resolve_directive_file(path, line)?;
                 let size = std::fs::metadata(&resolved)
-                    .map_err(|e| AsmError::new(format!("Cannot stat {}: {}", path, e)))?
+                    .map_err(|e| self.directive_io_error("Cannot stat", path, &resolved, &e, line))?
                     .len() as i64;
                 if !name.is_empty() {
                     let def_name = self.symbols.scoped_global_name(name);
@@ -1236,7 +1267,7 @@ impl Assembler {
                 ParsedLine::Directive(dir) => {
                     let kind = directive_emission_kind(dir);
                     let (section, offset_or_address) = self.debug_position();
-                    self.process_directive_pass2(dir, line.diag_file(), line.diag_line())?;
+                    self.process_directive_pass2(dir, line)?;
                     if let Some(kind) = kind {
                         self.record_debug_row(
                             line,
@@ -1286,11 +1317,16 @@ impl Assembler {
             None => self.pc as u32,
         };
         if end > offset_or_address {
+            // Debug file names are rendered from the retained resolved source
+            // path, expressed relative to the compilation directory when the
+            // file lies inside it. For a macro-expanded row this is the macro
+            // body's file, matching `origin`.
+            let file = source_display(&line.source_path, self.resolver.compilation_dir());
             self.debug_rows.push(DebugLineRow {
                 section,
                 offset_or_address,
                 byte_len: end - offset_or_address,
-                file: line.file.clone(),
+                file,
                 line_num: line.line_num,
                 column,
                 is_stmt,
@@ -1671,7 +1707,9 @@ impl Assembler {
         Ok(names)
     }
 
-    fn process_directive_pass2(&mut self, dir: &Directive, file: &str, line_num: usize) -> AsmResult<()> {
+    fn process_directive_pass2(&mut self, dir: &Directive, line: &SourceLine) -> AsmResult<()> {
+        let file = line.diag_file();
+        let line_num = line.diag_line();
         match dir {
             Directive::Org(expr) => {
                 if self.output_format == OutputFormat::Obj {
@@ -1782,9 +1820,9 @@ impl Assembler {
                     }));
             }
             Directive::IncBin { path, offset, length } => {
-                let resolved = self.resolve_file_path(path)?;
+                let resolved = self.resolve_directive_file(path, line)?;
                 let data = std::fs::read(&resolved)
-                    .map_err(|e| AsmError::new(format!("Cannot read {}: {}", path, e)))?;
+                    .map_err(|e| self.directive_io_error("Cannot read", path, &resolved, &e, line))?;
                 let off = offset.as_ref().map(|e| self.eval_expr(e).unwrap_or(0) as usize).unwrap_or(0);
                 let len = length.as_ref().map(|e| self.eval_expr(e).unwrap_or(0) as usize).unwrap_or(data.len() - off);
                 let slice = &data[off..off + len];
@@ -1792,9 +1830,9 @@ impl Assembler {
                 self.out_emit_bytes(&bytes);
             }
             Directive::FileSize { name, path } => {
-                let resolved = self.resolve_file_path(path)?;
+                let resolved = self.resolve_directive_file(path, line)?;
                 let size = std::fs::metadata(&resolved)
-                    .map_err(|e| AsmError::new(format!("Cannot stat {}: {}", path, e)))?
+                    .map_err(|e| self.directive_io_error("Cannot stat", path, &resolved, &e, line))?
                     .len() as i64;
                 if !name.is_empty() {
                     if self.symbols.exists(name) {
@@ -3195,16 +3233,35 @@ impl Assembler {
         bytes
     }
 
-    fn resolve_file_path(&self, path: &str) -> AsmResult<PathBuf> {
-        let p = self.project_dir.join(path);
-        if p.exists() {
-            return Ok(p);
+    /// Resolve a binary directive's operand relative to the file that contains
+    /// the statement, so setup files can use paths relative to themselves.
+    fn resolve_directive_file(&self, operand: &str, line: &SourceLine) -> AsmResult<PathBuf> {
+        let source_dir = line
+            .source_path
+            .parent()
+            .unwrap_or(self.resolver.compilation_dir());
+        self.resolver
+            .resolve(operand, source_dir)
+            .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))
+    }
+
+    /// Build an error for a failed read/stat of a resolved directive file.
+    fn directive_io_error(
+        &self,
+        action: &str,
+        operand: &str,
+        resolved: &Path,
+        error: &std::io::Error,
+        line: &SourceLine,
+    ) -> AsmError {
+        let mut message = format!("{} {}: {}", action, operand, error);
+        let resolved_display = source_display(resolved, self.resolver.compilation_dir());
+        if resolved_display != operand {
+            message.push_str(&format!(" (resolved to {})", resolved_display));
         }
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Ok(p);
-        }
-        Err(AsmError::new(format!("Cannot find file: {}", path)))
+        AsmError::new(message)
+            .ensure_location(line.diag_file(), line.diag_line())
+            .ensure_notes(expansion_notes(line))
     }
 }
 

@@ -6,6 +6,7 @@ use crate::diagnostics::{AsmError, AsmResult};
 use crate::object::dwarf::{DebugConstant, DebugInstance, DebugMember, DebugStructType};
 use crate::object::elf::{self, ObjSymbol, SymBinding, SymLocation, SymType};
 use crate::object::section::RelocTarget;
+use crate::preprocessor::IncludeSite;
 
 // Maximum number of bytes to display in the listing BYTES column
 const LISTING_MAX_BYTES: usize = 8;
@@ -90,7 +91,8 @@ pub fn generate_debug_companion(asm: &Assembler, config: &RomConfig) -> Vec<u8> 
         &constants,
         &structs,
         &instances,
-        asm.project_dir(),
+        asm.compilation_dir(),
+        asm.entry_source(),
         false,
     );
     crate::object::dwarf::add_function_regions(&mut debug_sections, asm, false);
@@ -210,7 +212,15 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
         .then(|| {
             // Object mode: emit relocations so ld.lld rebases the DWARF
             // section-relative references of each CU when concatenating.
-            crate::object::dwarf::debug_sections(&asm.debug_rows, &constants, &structs, &instances, asm.project_dir(), true)
+            crate::object::dwarf::debug_sections(
+                &asm.debug_rows,
+                &constants,
+                &structs,
+                &instances,
+                asm.compilation_dir(),
+                asm.entry_source(),
+                true,
+            )
         })
         .unwrap_or_default();
     if config.debug {
@@ -231,6 +241,11 @@ fn is_macro_scoped_name(name: &str) -> bool {
     name.contains('.')
 }
 
+/// Symbol provenance strings are recorded from `SourceLine::diag_file`, i.e.
+/// `paths::source_display` of the resolved source path against the compilation
+/// directory. They are therefore already in the same form DWARF expects (CWD
+/// relative where possible, `/` separated) and can be used directly in the
+/// directory/file tables.
 fn debug_constants(asm: &Assembler) -> Vec<DebugConstant> {
     let mut constants: Vec<_> = asm.symbols.all_globals()
         .values()
@@ -376,10 +391,10 @@ pub fn generate_listing(asm: &Assembler) -> String {
             .push(entry);
     }
 
-    // Walk sources recursively: original_sources is in depth-first order,
-    // so we use an index that advances as includes are encountered.
-    let mut source_idx = 0;
-    emit_source_listing(&mut out, asm, &lookup, &mut source_idx, true);
+    // `original_sources` is in depth-first order and `include_sites` records
+    // which occurrence produced which source entry, so the listing mirrors the
+    // traversal preprocessing actually performed.
+    emit_source_listing(&mut out, asm, &lookup, 0, true);
 
     out
 }
@@ -389,15 +404,13 @@ fn emit_source_listing(
     out: &mut String,
     asm: &Assembler,
     lookup: &HashMap<(String, usize), Vec<&ListingLine>>,
-    source_idx: &mut usize,
+    source_index: usize,
     is_first: bool,
 ) {
-    let idx = *source_idx;
-    if idx >= asm.original_sources.len() {
+    if source_index >= asm.original_sources.len() {
         return;
     }
-    let source = &asm.original_sources[idx];
-    *source_idx += 1;
+    let source = &asm.original_sources[source_index];
 
     // File header
     if !is_first {
@@ -427,10 +440,22 @@ fn emit_source_listing(
             continue;
         }
 
-        // .include directives: print the directive, then inline the included file
-        if trimmed_upper.starts_with(".INCLUDE") {
+        // `.include` occurrences recorded by preprocessing: print the directive
+        // line, then inline each expanded child. Include-once skips have no
+        // child and produce no listing section.
+        let mut sites: Vec<&IncludeSite> = asm
+            .include_sites
+            .iter()
+            .filter(|site| site.parent == source_index && site.line_num == line_num)
+            .collect();
+        if !sites.is_empty() {
+            sites.sort_by_key(|site| site.column_offset);
             format_source_only(out, line_num, line_text);
-            emit_source_listing(out, asm, lookup, source_idx, false);
+            for site in sites {
+                if let Some(child) = site.child {
+                    emit_source_listing(out, asm, lookup, child, false);
+                }
+            }
             // Resume header for current file after inclusion
             out.push('\n');
             out.push_str(&format!("--- {} ---\n", file_name));
@@ -532,4 +557,60 @@ fn generate_listing_fallback(asm: &Assembler) -> String {
 pub fn write_listing(listing: &str, path: &Path) -> AsmResult<()> {
     std::fs::write(path, listing)
         .map_err(|e| AsmError::new(format!("Failed to write listing file: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preprocessor::{IncludeSite, OriginalSource};
+    use crate::project::CpuMode;
+    use std::path::PathBuf;
+
+    fn source(file: &str, lines: &[&str]) -> OriginalSource {
+        OriginalSource {
+            file: file.to_string(),
+            lines: lines.iter().map(|line| line.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn listing_inlines_recorded_includes_and_skips_deduped_ones() {
+        let mut asm = Assembler::new(CpuMode::I8080, PathBuf::from("."), &[]);
+        asm.original_sources = vec![
+            source(
+                "main.asm",
+                &[
+                    "part: .include \"part.asm\"",
+                    "nop \\ .include \"once.asm\"",
+                    ".include \"once.asm\"",
+                ],
+            ),
+            source("part.asm", &[".byte $11"]),
+            source("once.asm", &["; once"]),
+        ];
+        // The third occurrence was skipped by include-once handling, so its
+        // site has no child.
+        asm.include_sites = vec![
+            IncludeSite { parent: 0, line_num: 1, column_offset: 0, child: Some(1) },
+            IncludeSite { parent: 0, line_num: 2, column_offset: 10, child: Some(2) },
+            IncludeSite { parent: 0, line_num: 3, column_offset: 0, child: None },
+        ];
+
+        let listing = generate_listing(&asm);
+
+        // Every directive line is shown, including the labelled and the
+        // backslash-separated occurrences.
+        assert!(listing.contains("part: .include \"part.asm\""));
+        assert!(listing.contains("nop \\ .include \"once.asm\""));
+        assert!(listing.contains(".include \"once.asm\""));
+
+        // Each expanded child is inlined exactly once.
+        assert_eq!(listing.matches("--- part.asm ---").count(), 1);
+        assert_eq!(listing.matches("--- once.asm ---").count(), 1);
+
+        // The include sections appear in traversal order.
+        assert!(
+            listing.find("--- part.asm ---").unwrap() < listing.find("--- once.asm ---").unwrap()
+        );
+    }
 }

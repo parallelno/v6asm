@@ -1,0 +1,17 @@
+# A label before .include marks the start address of the included block
+
+[files]
+"main.asm" = '''
+.org $0100
+nop
+data_start: .include "part.asm"
+'''
+"part.asm" = '''
+.byte $AA
+'''
+
+[expect]
+rom = "00 AA"
+
+[expect.symbols]
+data_start = 257
