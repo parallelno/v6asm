@@ -22,29 +22,29 @@ debugger already parses for C.
 
 ```asm
 .struct actor
-update_ptr:             word    ; .word function pointer for updating logic
-draw_ptr:               word    ; .word function pointer for drawing
-status:                 byte    ; .byte what the actor is doing
-status_timer:           byte
-anim_timer:             byte
-anim_ptr:               word
-erase_scr_addr:         word
-erase_scr_addr_old:     word
-erase_wh:               word
-erase_wh_old:           word
-pos_x:                  word
-pos_y:                  word
-speed_x:                word
-speed_y:                word
+  update_ptr:             word    ; .word function pointer for updating logic
+  draw_ptr:               word    ; .word function pointer for drawing
+  status:                 byte    ; .byte what the actor is doing
+  status_timer:           byte
+  anim_timer:             byte
+  anim_ptr:               word
+  erase_scr_addr:         word
+  erase_scr_addr_old:     word
+  erase_wh:               word
+  erase_wh_old:           word
+  pos_x:                  word
+  pos_y:                  word
+  speed_x:                word
+  speed_y:                word
 .endstruct
 ; generated:  actor.update_ptr = 0 ... actor.speed_y = 23, actor.size = 25
 
 .struct char extends actor
-data_next_ptr:          word    ; NULL if last actor in the list
-impacted_ptr:           word
-id:                     byte
-type:                   byte
-health:                 byte
+  data_next_ptr:          word    ; NULL if last actor in the list
+  impacted_ptr:           word
+  id:                     byte
+  type:                   byte
+  health:                 byte
 .endstruct
 ; generated:  char.data_next_ptr = 25 ... char.health = 32, char.size = 33
 ; inherited:  char.pos_x == actor.pos_x == 17
@@ -301,6 +301,3 @@ ordinary symbols.
   unchanged (existing `dwarf-types.ts` fixtures).
 - Regression: macro substitution inside dotted identifiers; `.pragma once`
   guarded definition files; `.global *` interaction.
-
-
-

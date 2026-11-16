@@ -136,6 +136,45 @@ db <$ABCD       ; Emits $CD
 db >$ABCD       ; Emits $AB
 ```
 
+### Operand and Data Ranges
+
+A **width-limited value** is an instruction operand or data element stored in
+a fixed number of bits. Values must fit either the signed or unsigned range
+of that width; implicit truncation is an error:
+
+| Destination | Accepted range |
+|-------------|----------------|
+| 8-bit immediate, port, `.byte` / `DB`, `.storage` fill byte | -128 through 255 |
+| 16-bit immediate/address, `.word` / `DW` | -32768 through 65535 |
+| `.dword` / `DD` | -2147483648 through 4294967295 |
+| `RST` vector | 0 through 7 |
+
+Negative values are encoded in two's complement. These rules apply to all
+supported instruction forms, including Z80-compatible forms. `RST` accepts a
+constant expression, not just a literal, and validates the resulting vector.
+
+For ROM output, the assembler checks final resolved values, including forward
+label references. For object output, it checks constants during assembly;
+relocatable 16-bit addresses remain subject to the linker's range checks.
+A relocatable address in an 8-bit immediate or `.byte` element must explicitly
+select its low byte with `<(expr)` or high byte with `>(expr)`, even if the label
+will eventually be placed below address 256:
+
+```asm
+mvi a, 256             ; error: outside the 8-bit range
+mvi a, <($1234)        ; valid: explicitly selects $34
+mvi a, label           ; object output: error, byte selection required
+mvi a, <(label)        ; object output: low-byte relocation
+db >(label)            ; object output: high-byte relocation
+lxi h, label           ; object output: full 16-bit address relocation
+```
+
+This replaces earlier implicit truncation of out-of-range constants. To migrate,
+use byte extraction when selecting part of an address/value, or an explicit mask
+such as `VALUE & $FFFF` for intentional constant word truncation. A difference
+between labels in the same section is a constant and is checked against the
+destination range rather than requiring byte selection.
+
 ### Symbols
 
 Expressions can reference:

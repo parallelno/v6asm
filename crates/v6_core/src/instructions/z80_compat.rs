@@ -62,7 +62,7 @@ fn encode_ld(operands: &[ParsedOperand]) -> AsmResult<EncodedInstruction> {
             i8080::encode("MOV", operands)
         }
         // LD r, n (immediate)
-        (ParsedOperand::Reg(_) | ParsedOperand::Memory, ParsedOperand::Imm8) => {
+        (ParsedOperand::Reg(_) | ParsedOperand::Memory, ParsedOperand::Imm8 | ParsedOperand::Imm16) => {
             i8080::encode("MVI", operands)
         }
         // LD rp, nn (16-bit immediate)
@@ -162,7 +162,7 @@ fn encode_z80_alu_reg(operands: &[ParsedOperand], reg_base: u8, imm_opcode: u8) 
         return Err(AsmError::new("ALU instruction requires an operand"));
     }
     match &operands[0] {
-        ParsedOperand::Imm8 => {
+        ParsedOperand::Imm8 | ParsedOperand::Imm16 => {
             Ok(EncodedInstruction {
                 bytes: vec![imm_opcode, 0],
                 size: 2,

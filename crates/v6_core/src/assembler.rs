@@ -1737,7 +1737,10 @@ impl Assembler {
             }
             Directive::Storage { length, filler } => {
                 let len = self.eval_expr(length)? as u16;
-                let fill = filler.as_ref().map(|e| self.eval_expr(e)).transpose()?.map(|v| v as u8);
+                let fill = filler.as_ref().map(|e| {
+                    Self::check_value_range(self.eval_expr(e)?, 8, ".storage fill byte")
+                        .map(|v| v as u8)
+                }).transpose()?;
                 self.out_reserve(len, fill);
             }
             Directive::Byte(exprs) => {
@@ -1857,6 +1860,24 @@ impl Assembler {
     }
 
     fn emit_instruction(&mut self, mnemonic: &str, operands: &[ParsedOperand], expressions: &[Expr]) -> AsmResult<()> {
+        // RST embeds a vector in the opcode rather than an immediate byte.
+        // Resolve expressions here, after forward references have been defined.
+        if mnemonic.eq_ignore_ascii_case("RST") {
+            if operands.len() != 1 || expressions.len() != 1 {
+                return Err(AsmError::new("RST requires one vector expression (0-7)"));
+            }
+            let value = if self.output_format == OutputFormat::Obj {
+                self.eval_reloc(&expressions[0])?.require_constant()?
+            } else {
+                self.eval_expr(&expressions[0])?
+            };
+            if !(0..=7).contains(&value) {
+                return Err(AsmError::new(format!("RST vector {} out of range: expected 0-7", value)));
+            }
+            let encoded = encode_instruction(mnemonic, &[ParsedOperand::RstNum(value as u8)], self.cpu_mode)?;
+            self.out_emit_bytes(&encoded.bytes);
+            return Ok(());
+        }
         let mut encoded = encode_instruction(mnemonic, operands, self.cpu_mode)?;
 
         // Validate that any instruction requiring an immediate has exactly the right
@@ -1892,11 +1913,7 @@ impl Assembler {
             if encoded.has_imm8 && expr_idx < expressions.len() {
                 let rv = self.eval_reloc(&expressions[expr_idx])?;
                 if let Some(target) = rv.target.clone() {
-                    let kind = match rv.byte_op {
-                        ByteOp::Lo => RelocKind::Lo8,
-                        ByteOp::Hi => RelocKind::Hi8,
-                        ByteOp::None => RelocKind::Abs8,
-                    };
+                    let kind = Self::byte_reloc_kind(rv.byte_op, "8-bit immediate")?;
                     self.obj.sections[active].add_reloc(Reloc {
                         offset: base + 1,
                         kind,
@@ -1904,7 +1921,7 @@ impl Assembler {
                         addend: rv.addend,
                     });
                 } else {
-                    encoded.bytes[1] = rv.require_constant()? as u8;
+                    encoded.bytes[1] = Self::check_value_range(rv.require_constant()?, 8, mnemonic)? as u8;
                 }
                 expr_idx += 1;
             }
@@ -1923,7 +1940,7 @@ impl Assembler {
                         addend: rv.addend,
                     });
                 } else {
-                    let val = rv.require_constant()? as u16;
+                    let val = Self::check_value_range(rv.require_constant()?, 16, mnemonic)? as u16;
                     encoded.bytes[1] = (val & 0xFF) as u8;
                     encoded.bytes[2] = ((val >> 8) & 0xFF) as u8;
                 }
@@ -1935,12 +1952,12 @@ impl Assembler {
         // Fill in immediate values from expressions
         let mut expr_idx = 0;
         if encoded.has_imm8 && expr_idx < expressions.len() {
-            let val = self.eval_expr(&expressions[expr_idx])? as u8;
+            let val = Self::check_value_range(self.eval_expr(&expressions[expr_idx])?, 8, mnemonic)? as u8;
             encoded.bytes[1] = val;
             expr_idx += 1;
         }
         if encoded.has_imm16 && expr_idx < expressions.len() {
-            let val = self.eval_expr(&expressions[expr_idx])? as u16;
+            let val = Self::check_value_range(self.eval_expr(&expressions[expr_idx])?, 16, mnemonic)? as u16;
             encoded.bytes[1] = (val & 0xFF) as u8;
             encoded.bytes[2] = ((val >> 8) & 0xFF) as u8;
         }
@@ -1955,6 +1972,31 @@ impl Assembler {
         Ok(encoded.size)
     }
 
+    /// Accept signed or unsigned values representable in the destination width.
+    /// Call before narrowing casts so truncation is always explicit in source.
+    fn check_value_range(value: i64, bits: u32, context: &str) -> AsmResult<i64> {
+        let min = -(1i64 << (bits - 1));
+        let max = (1i64 << bits) - 1;
+        if !(min..=max).contains(&value) {
+            return Err(AsmError::new(format!(
+                "{}: value {} out of range for {} bits: expected [{}, {}]",
+                context, value, bits, min, max,
+            )));
+        }
+        Ok(value)
+    }
+
+    fn byte_reloc_kind(byte_op: ByteOp, context: &str) -> AsmResult<RelocKind> {
+        match byte_op {
+            ByteOp::Lo => Ok(RelocKind::Lo8),
+            ByteOp::Hi => Ok(RelocKind::Hi8),
+            ByteOp::None => Err(AsmError::new(format!(
+                "relocatable address used as an {}; use <(expr) or >(expr) to select a byte explicitly",
+                context,
+            ))),
+        }
+    }
+
     /// Emit one byte of data from an expression (`.byte`/`DB` element),
     /// generating a relocation in object mode if needed.
     fn emit_byte_expr(&mut self, expr: &Expr) -> AsmResult<()> {
@@ -1963,18 +2005,14 @@ impl Assembler {
             let off = self.obj.sections[active].size;
             let rv = self.eval_reloc(expr)?;
             if let Some(target) = rv.target.clone() {
-                let kind = match rv.byte_op {
-                    ByteOp::Lo => RelocKind::Lo8,
-                    ByteOp::Hi => RelocKind::Hi8,
-                    ByteOp::None => RelocKind::Abs8,
-                };
+                let kind = Self::byte_reloc_kind(rv.byte_op, "8-bit data byte")?;
                 self.obj.sections[active].add_reloc(Reloc { offset: off, kind, target, addend: rv.addend });
                 self.out_emit_byte(0);
             } else {
-                self.out_emit_byte(rv.require_constant()? as u8);
+                self.out_emit_byte(Self::check_value_range(rv.require_constant()?, 8, ".byte")? as u8);
             }
         } else {
-            let val = self.eval_expr(expr)? as u8;
+            let val = Self::check_value_range(self.eval_expr(expr)?, 8, ".byte")? as u8;
             self.out_emit_byte(val);
         }
         Ok(())
@@ -2002,12 +2040,12 @@ impl Assembler {
                 self.out_emit_byte(0);
                 self.out_emit_byte(0);
             } else {
-                let val = rv.require_constant()? as u16;
+                let val = Self::check_value_range(rv.require_constant()?, 16, ".word")? as u16;
                 self.out_emit_byte((val & 0xFF) as u8);
                 self.out_emit_byte(((val >> 8) & 0xFF) as u8);
             }
         } else {
-            let val = self.eval_expr(expr)? as u16;
+            let val = Self::check_value_range(self.eval_expr(expr)?, 16, ".word")? as u16;
             self.out_emit_byte((val & 0xFF) as u8);
             self.out_emit_byte(((val >> 8) & 0xFF) as u8);
         }
@@ -2054,12 +2092,13 @@ impl Assembler {
             let rv = self.eval_reloc(expr)?;
             let val = rv.require_constant().map_err(|_| AsmError::new(
                 "relocatable .dword is not supported (no 32-bit V6C relocation)",
-            ))? as u32;
+            ))?;
+            let val = Self::check_value_range(val, 32, ".dword")? as u32;
             for i in 0..4 {
                 self.out_emit_byte(((val >> (i * 8)) & 0xFF) as u8);
             }
         } else {
-            let val = self.eval_expr(expr)? as u32;
+            let val = Self::check_value_range(self.eval_expr(expr)?, 32, ".dword")? as u32;
             for i in 0..4 {
                 self.out_emit_byte(((val >> (i * 8)) & 0xFF) as u8);
             }

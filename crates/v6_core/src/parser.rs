@@ -889,7 +889,12 @@ fn parse_instruction(tokens: &[LocatedToken], pos: &mut usize, cpu_mode: CpuMode
     }
 
     // Parse operands
-    let (operands, expressions) = parse_operands(tokens, pos, &upper, cpu_mode)?;
+    let (mut operands, expressions) = parse_operands(tokens, pos, &upper, cpu_mode)?;
+    if upper == "RST" && operands.len() == 1 && expressions.len() == 1 {
+        // The vector is evaluated during emission, not encoded from a parser
+        // placeholder. This also supports named constants and forward references.
+        operands[0] = ParsedOperand::RstNum(0);
+    }
 
     Ok(ParsedLine::Instruction {
         mnemonic: upper,
@@ -1034,15 +1039,7 @@ fn parse_operands(
 
                 // For RST, the operand is 0-7
                 if mnemonic == "RST" {
-                    if let Expr::Number(n) = &expressions[expressions.len() - 1] {
-                        if *n >= 0 && *n <= 7 {
-                            operands.push(ParsedOperand::RstNum(*n as u8));
-                        } else {
-                            return Err(AsmError::new("RST vector must be 0-7"));
-                        }
-                    } else {
-                        operands.push(ParsedOperand::RstNum(0)); // placeholder
-                    }
+                    operands.push(ParsedOperand::RstNum(0)); // evaluated during emission
                 } else if needs_imm16(mnemonic) {
                     operands.push(ParsedOperand::Imm16);
                 } else {

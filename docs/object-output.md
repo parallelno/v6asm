@@ -180,6 +180,11 @@ evaluated as **relocatable expressions**. A relocatable expression is at most:
 - A reference to a label or external symbol produces a **relocation**; any
   added/subtracted constant becomes the relocation addend (`A` in `S + A`).
 - `<(expr)` takes the low byte, `>(expr)` the high byte of the resolved address.
+- An 8-bit instruction immediate or `.byte` element referencing an address
+  **must** use `<(expr)` or `>(expr)`. A bare relocatable address is an
+  assembly error, even when its section offset fits in a byte. Constants must
+  fit the destination range; they are never implicitly truncated. See
+  [Operand and Data Ranges](syntax.md#operand-and-data-ranges).
 - Differences of symbols in **different** sections, scaling a symbol, or other
   non-linear use of a symbol are errors.
 
@@ -191,7 +196,7 @@ PC-relative relocations.
 | Name | Value | Width | Produced by |
 |------|-------|-------|-------------|
 | `R_V6C_NONE` | 0 | — | (none) |
-| `R_V6C_8` | 1 | 1 byte | 8-bit immediate referencing a symbol |
+| `R_V6C_8` | 1 | 1 byte | Reserved for compatibility; not emitted from source (explicit byte selection required) |
 | `R_V6C_16` | 2 | 2 bytes | 16-bit address operands (`JMP`, `CALL`, `LXI`, `LHLD`, `SHLD`, `LDA`, `STA`, conditional jumps/calls) and `.word` |
 | `R_V6C_LO8` | 3 | 1 byte | `<(sym)` low-byte immediate |
 | `R_V6C_HI8` | 4 | 1 byte | `>(sym)` high-byte immediate |

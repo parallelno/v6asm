@@ -45,14 +45,18 @@ impl Drop for TempDir {
 
 /// Assemble `source` in object mode and return the assembler for inspection.
 fn assemble_obj(source: &str) -> Result<Assembler, AsmError> {
+    assemble_source(source, OutputFormat::Obj, CpuMode::I8080)
+}
+
+fn assemble_source(source: &str, format: OutputFormat, cpu: CpuMode) -> Result<Assembler, AsmError> {
     let dir = TempDir::new();
     let main_path = dir.root.join("main.asm");
     fs::write(&main_path, source).unwrap();
 
     let resolver = PathResolver::new(dir.root.clone(), &[]);
-    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone(), &[]);
+    let mut asm = Assembler::new(cpu, dir.root.clone(), &[]);
     asm.quiet = true;
-    asm.output_format = OutputFormat::Obj;
+    asm.output_format = format;
     asm.set_entry_source(main_path.clone());
 
     let program = preprocess(&main_path, &resolver, &mut asm.symbols, &|path| {
@@ -65,21 +69,132 @@ fn assemble_obj(source: &str) -> Result<Assembler, AsmError> {
 }
 
 fn assemble_rom(source: &str) -> Result<Assembler, AsmError> {
-    let dir = TempDir::new();
-    let main_path = dir.root.join("main.asm");
-    fs::write(&main_path, source).unwrap();
+    assemble_source(source, OutputFormat::Rom, CpuMode::I8080)
+}
 
-    let resolver = PathResolver::new(dir.root.clone(), &[]);
-    let mut asm = Assembler::new(CpuMode::I8080, dir.root.clone(), &[]);
-    asm.quiet = true;
-    asm.set_entry_source(main_path.clone());
-    let program = preprocess(&main_path, &resolver, &mut asm.symbols, &|path| {
-        fs::read_to_string(path).map_err(|err| AsmError::new(err.to_string()))
-    })?;
-    asm.original_sources = program.sources;
-    asm.include_sites = program.includes;
-    asm.assemble(&program.lines)?;
-    Ok(asm)
+#[test]
+fn width_limited_constants_reject_overflow_in_both_formats() {
+    let byte_instructions = [
+        "mvi a,", "mvi m,", "adi", "aci", "sui", "sbi", "ani", "xri", "ori", "cpi", "in", "out",
+        ".byte", "db", ".storage 1,",
+    ];
+    let word_instructions = [
+        "lxi h,", "lxi sp,", "lda", "sta", "lhld", "shld", "jmp", "jnz", "jz", "jnc", "jc",
+        "jpo", "jpe", "jp", "jm", "call", "cnz", "cz", "cnc", "cc", "cpo", "cpe", "cp", "cm",
+        ".word", "dw",
+    ];
+    for format in [OutputFormat::Rom, OutputFormat::Obj] {
+        for (instructions, values) in [
+            (byte_instructions.as_slice(), [-129i64, 256]),
+            (word_instructions.as_slice(), [-32769, 65536]),
+            ([".dword", "dd"].as_slice(), [-2147483649, 4294967296]),
+        ] {
+            for instruction in instructions {
+                for value in values {
+                    let source = format!("VALUE = {}\n{} VALUE\n", value, instruction);
+                    let err = assemble_source(&source, format, CpuMode::I8080).err().unwrap();
+                    assert!(err.message.contains("out of range"), "{}: {}", source, err.message);
+                    assert_eq!(err.location.unwrap().line, 2, "{}", source);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn width_boundaries_and_explicit_extraction_have_matching_rom_and_object_bytes() {
+    let source = "mvi a, -128\nmvi a, 255\nlxi h, -32768\nlxi h, 65535\n\
+        .byte -128, 255, <($1234), >($1234)\n\
+        .word -32768, 65535, <($1234), >($1234)\n\
+        .dword -2147483648, 4294967295\n\
+        mvi a, <($1234)\nmvi a, >($1234)\n";
+    let expected = vec![
+        0x3e, 0x80, 0x3e, 0xff, 0x21, 0x00, 0x80, 0x21, 0xff, 0xff,
+        0x80, 0xff, 0x34, 0x12, 0x00, 0x80, 0xff, 0xff, 0x34, 0, 0x12, 0,
+        0, 0, 0, 0x80, 0xff, 0xff, 0xff, 0xff, 0x3e, 0x34, 0x3e, 0x12,
+    ];
+    let rom = assemble_rom(source).unwrap();
+    let bytes: Vec<_> = (0..expected.len()).map(|i| rom.output.read_byte(i as u16).unwrap()).collect();
+    assert_eq!(bytes, expected);
+    assert_eq!(assemble_obj(source).unwrap().obj.sections[0].bytes, expected);
+}
+
+#[test]
+fn object_byte_addresses_require_explicit_extraction_even_for_low_labels() {
+    for target in ["target", "external", "target + 1", "@local", "*"] {
+        for instruction in ["mvi a,", "adi", "in", "out", ".byte", "db"] {
+            let source = format!("target:\n@local:\n{} {}\n", instruction, target);
+            let err = assemble_obj(&source).err().unwrap();
+            assert!(err.message.contains("use <(expr) or >(expr)"), "{}: {}", source, err.message);
+            assert_eq!(err.location.unwrap().line, 3);
+            for op in ["<", ">"] {
+                let source = format!("target:\n@local:\n{} {}({})\n", instruction, op, target);
+                assemble_obj(&source).unwrap();
+            }
+        }
+    }
+    // A same-section label difference is a constant, not an address.
+    assemble_obj("start:\nnop\nfinish:\nmvi a, finish - start\n.byte finish - start\n").unwrap();
+    let err = assemble_obj("start:\n.storage 256\nfinish:\nmvi a, finish - start\n").err().unwrap();
+    assert!(err.message.contains("out of range"));
+    assemble_obj("lxi h, external\n.word external\n").unwrap();
+}
+
+#[test]
+fn rom_forward_addresses_are_checked_after_resolution() {
+    for instruction in ["mvi a,", "adi", "out", ".byte"] {
+        let source = format!(".org $100\n{} target\ntarget:\nnop\n", instruction);
+        let err = assemble_rom(&source).err().unwrap();
+        assert!(err.message.contains("out of range"), "{}", err.message);
+        for op in ["<", ">"] {
+            assemble_rom(&format!(".org $100\n{} {}(target)\ntarget:\nnop\n", instruction, op)).unwrap();
+        }
+    }
+    assemble_rom("mvi a, target\ntarget:\nnop\n").unwrap();
+    for instruction in ["lxi h,", "jmp", "call", ".word"] {
+        let source = format!("{} target + 65536\ntarget:\nnop\n", instruction);
+        assert!(assemble_rom(&source).err().unwrap().message.contains("out of range"));
+    }
+}
+
+#[test]
+fn rst_expressions_are_resolved_and_range_checked() {
+    for format in [OutputFormat::Rom, OutputFormat::Obj] {
+        for cpu in [CpuMode::I8080, CpuMode::Z80] {
+            for (operand, definitions, opcode) in [
+                ("0", "", 0xc7), ("7", "", 0xff),
+                ("VECTOR", "VECTOR = 5\n", 0xef), ("(2 + 1)", "", 0xdf),
+                ("<(263)", "", 0xff),
+            ] {
+                let source = format!("rst {}\n{}", operand, definitions);
+                let asm = assemble_source(&source, format, cpu).unwrap();
+                let actual = if format == OutputFormat::Obj { asm.obj.sections[0].bytes[0] } else { asm.output.read_byte(0).unwrap() };
+                assert_eq!(actual, opcode, "{}", source);
+            }
+            for operand in ["-1", "8", "256", "(4 + 4)", "VECTOR"] {
+                let source = format!("VECTOR = 8\nrst {}\n", operand);
+                let err = assemble_source(&source, format, cpu).err().unwrap();
+                assert!(err.message.contains("RST vector"), "{}: {}", source, err.message);
+            }
+            for source in ["rst\n", "rst 1, 2\n", "rst a\n"] {
+                assert!(assemble_source(source, format, cpu).is_err(), "{}", source);
+            }
+        }
+    }
+    assert!(assemble_obj("label:\nrst label\n").err().unwrap().message.contains("constant"));
+}
+
+#[test]
+fn z80_compatibility_operands_follow_width_rules() {
+    for format in [OutputFormat::Rom, OutputFormat::Obj] {
+        for instruction in ["ld a, 256", "adi -129", "and 256", "cp 256", "ld hl, 65536", "jp 65536", "call nz, 65536"] {
+            let err = assemble_source(&format!("{}\n", instruction), format, CpuMode::Z80).err().unwrap();
+            assert!(err.message.contains("out of range"), "{}: {}", instruction, err.message);
+        }
+    }
+    let err = assemble_source("label:\nld a, label\n", OutputFormat::Obj, CpuMode::Z80).err().unwrap();
+    assert!(err.message.contains("use <(expr) or >(expr)"));
+    assemble_source("label:\nld a, <(label)\n", OutputFormat::Obj, CpuMode::Z80).unwrap();
 }
 
 #[test]

@@ -496,10 +496,10 @@ Defines a user-defined composite data type (struct). Structs can be expanded
 
 ```asm
 .struct actor
-update_ptr:   word
-status:       byte
-pos_x:        word
-pos_y:        word
+  update_ptr:   word
+  status:       byte
+  pos_x:        word
+  pos_y:        word
 .ends
 ```
 
@@ -530,7 +530,7 @@ symbol.
 
 ### `.byte` / `DB`
 
-Emit one or more bytes at the current address. Accepts decimal, hex (`0x`/`$`), or binary (`b`/`%`).
+Emit one or more bytes at the current address. Accepts decimal, hex (`0x`/`$`), or binary (`b`/`%`). Values must be in -128 through 255; out-of-range values are errors rather than implicitly truncated. In object output, addresses require explicit `<(expr)` or `>(expr)` byte extraction.
 
 ```asm
 .byte 255, $10, 0xFF, b1111_0000, %11_11_00_00
@@ -540,7 +540,7 @@ Emits `FF 10 FF F0 F0`.
 
 ### `.word` / `DW`
 
-Emit one or more 16-bit words (little-endian). Negative values down to -0x7FFF are encoded using two's complement.
+Emit one or more 16-bit words (little-endian). Values must be in -32768 through 65535; negative values use two's complement. Out-of-range values are errors rather than implicitly truncated. Object output supports full-address relocations; byte extraction on a relocatable `.word` remains unsupported.
 
 ```asm
 .word $1234, 42, b0000_1111, -5
@@ -550,7 +550,7 @@ Outputs `34 12 2A 00 0F 00 FB FF`.
 
 ### `.dword` / `DD`
 
-Emit one or more 32-bit words (little-endian). Negative values down to -0x7FFFFFFF are encoded using two's complement.
+Emit one or more 32-bit words (little-endian). Values must be in -2147483648 through 4294967295; negative values use two's complement. Out-of-range values are errors rather than implicitly truncated.
 
 ```asm
 .dword $12345678, CONST_BASE + 0x22, -1
