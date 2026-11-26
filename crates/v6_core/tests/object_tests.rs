@@ -422,6 +422,97 @@ fn debug_symbols_have_function_and_data_extents() {
     assert_eq!(symbols["data"], (3, 1));
 }
 
+/// Names of the symbols in the ELF `.symtab` section.
+fn symtab_names(bytes: &[u8]) -> Vec<String> {
+    let e_shoff = read_u32(bytes, 32) as usize;
+    let e_shentsize = read_u16(bytes, 46) as usize;
+    let e_shnum = read_u16(bytes, 48) as usize;
+    let e_shstrndx = read_u16(bytes, 50) as usize;
+    let sh = |index: usize| e_shoff + index * e_shentsize;
+    let shstr_off = read_u32(bytes, sh(e_shstrndx) + 16) as usize;
+    let str_at = |base: usize, idx: u32| -> String {
+        let start = base + idx as usize;
+        let end = start + bytes[start..].iter().position(|&byte| byte == 0).unwrap();
+        String::from_utf8_lossy(&bytes[start..end]).into_owned()
+    };
+    let section_names: Vec<String> = (0..e_shnum)
+        .map(|index| str_at(shstr_off, read_u32(bytes, sh(index))))
+        .collect();
+    let symtab_index = section_names.iter().position(|name| name == ".symtab").unwrap();
+    let strtab_index = section_names.iter().position(|name| name == ".strtab").unwrap();
+    let symtab_off = read_u32(bytes, sh(symtab_index) + 16) as usize;
+    let symtab_size = read_u32(bytes, sh(symtab_index) + 20) as usize;
+    let strtab_off = read_u32(bytes, sh(strtab_index) + 16) as usize;
+    (0..symtab_size / 16)
+        .map(|index| str_at(strtab_off, read_u32(bytes, symtab_off + index * 16)))
+        .collect()
+}
+
+#[test]
+fn struct_instance_end_labels_are_emitted_in_object_symbols() {
+    let asm = assemble_obj(
+        ".struct actor\n\
+         a: byte\n\
+         b: word\n\
+         .ends\n\
+         hero: actor\n\
+         pool: actor[2]\n",
+    )
+    .unwrap();
+
+    // Section-relative end of the instance / pool.
+    let hero_end = asm.symbols.get_global_info("hero.end").expect("hero.end");
+    assert_eq!(hero_end.value, Some(3));
+    assert_eq!(hero_end.section, Some(0));
+    assert!(hero_end.is_code_label);
+    let pool_end = asm.symbols.get_global_info("pool.end").expect("pool.end");
+    assert_eq!(pool_end.value, Some(9));
+    assert_eq!(pool_end.section, Some(0));
+
+    // The auto labels are ordinary module-level symbols, so they reach the
+    // debug object's symbol table (they contain a dot but are not macro-scoped).
+    let names = symtab_names(&generate_object(&asm, &ObjConfig { debug: true }).unwrap());
+    assert!(names.iter().any(|name| name == "hero.end"), "symbols: {names:?}");
+    assert!(names.iter().any(|name| name == "pool.end"), "symbols: {names:?}");
+}
+
+#[test]
+fn global_star_exports_generated_struct_symbols() {
+    let asm = assemble_obj(
+        ".globl *\n\
+         .struct actor\n\
+         a: byte\n\
+         .ends\n\
+         hero: actor\n",
+    )
+    .unwrap();
+
+    // No `-g`: only exported (global) symbols reach the symtab, so this
+    // exercises the `.global *` path rather than the debug-locals path.
+    let names = symtab_names(&generate_object(&asm, &ObjConfig::default()).unwrap());
+    assert!(names.iter().any(|name| name == "hero.end"), "symbols: {names:?}");
+    assert!(names.iter().any(|name| name == "actor.size"), "symbols: {names:?}");
+}
+
+#[test]
+fn macro_scoped_symbols_stay_out_of_object_symbols() {
+    let asm = assemble_obj(
+        ".macro emit\n\
+         nop\n\
+         inner:\n\
+         hlt\n\
+         .endmacro\n\
+         emit()\n\
+         entry:\n\
+         nop\n",
+    )
+    .unwrap();
+
+    let names = symtab_names(&generate_object(&asm, &ObjConfig { debug: true }).unwrap());
+    assert!(names.iter().any(|name| name == "entry"), "symbols: {names:?}");
+    assert!(!names.iter().any(|name| name.contains("EMIT_1.")), "symbols: {names:?}");
+}
+
 #[test]
 fn debug_elf_exports_immutable_absolute_constants() {
     let object = generate_object(

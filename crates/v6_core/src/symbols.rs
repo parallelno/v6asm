@@ -29,6 +29,12 @@ pub struct SymbolInfo {
     /// constant assignment (`foo = expr`). Used by the ELF serialiser to
     /// decide whether to set `STT_FUNC` on executable-section symbols.
     pub is_code_label: bool,
+    /// True when the symbol was defined inside a macro expansion and is
+    /// therefore namespaced as `<MacroName>_<call-index>.<name>`. Output
+    /// code must use this flag instead of testing for a dot in the name:
+    /// struct-generated symbols such as `<instance>.end` or `<name>.size`
+    /// also contain a dot but are ordinary module-level symbols.
+    pub is_macro_scoped: bool,
 }
 
 /// Information about a macro definition
@@ -201,6 +207,14 @@ impl SymbolTable {
                 name
             )));
         }
+        // Preserve the pass-1 classification when pass 2 redefines a symbol
+        // whose name is already namespaced, even if the macro scope stack has
+        // since been popped (e.g. deferred constants resolved after pass 1).
+        let is_macro_scoped = !self.macro_scope_stack.is_empty()
+            || self
+                .globals
+                .get(&key)
+                .is_some_and(|existing| existing.is_macro_scoped);
         let info = SymbolInfo {
             value: Some(addr as i64),
             expr: None,
@@ -213,9 +227,9 @@ impl SymbolTable {
             section,
             original_name: name.to_string(),
             is_code_label: true,
+            is_macro_scoped,
         };
 
-        let key = ci(name);
         if let Some(existing) = self.globals.get(&key) {
             if !existing.is_mutable && existing.value.is_some() {
                 // Allow redef if same value (pass 2 redefining)
@@ -252,6 +266,7 @@ impl SymbolTable {
             section,
             original_name: name.to_string(),
             is_code_label: true,
+            is_macro_scoped: !self.macro_scope_stack.is_empty(),
         };
 
         let key = (ci(name), self.current_scope);
@@ -268,6 +283,13 @@ impl SymbolTable {
                 name
             )));
         }
+        // Preserve the pass-1 classification for deferred constants that are
+        // resolved after the macro scope stack has been restored.
+        let is_macro_scoped = !self.macro_scope_stack.is_empty()
+            || self
+                .globals
+                .get(&key)
+                .is_some_and(|existing| existing.is_macro_scoped);
         if let Some(existing) = self.globals.get(&key) {
             if !existing.is_mutable && existing.value.is_some() {
                 // Allow same-value redefinition (pass 2)
@@ -289,6 +311,7 @@ impl SymbolTable {
             section: None,
             original_name: name.to_string(),
             is_code_label: false,
+            is_macro_scoped,
         };
         self.globals.insert(key, info);
         Ok(())
@@ -310,6 +333,7 @@ impl SymbolTable {
             section: None,
             original_name: name.to_string(),
             is_code_label: false,
+            is_macro_scoped: !self.macro_scope_stack.is_empty(),
         };
         let key = (ci(name), self.current_scope);
         self.locals.entry(key).or_default().push(info);
@@ -325,6 +349,11 @@ impl SymbolTable {
                 name
             )));
         }
+        let is_macro_scoped = !self.macro_scope_stack.is_empty()
+            || self
+                .globals
+                .get(&key)
+                .is_some_and(|existing| existing.is_macro_scoped);
         let info = SymbolInfo {
             value: Some(value),
             expr: None,
@@ -337,6 +366,7 @@ impl SymbolTable {
             section: None,
             original_name: name.to_string(),
             is_code_label: false,
+            is_macro_scoped,
         };
         self.globals.insert(ci(name), info);
         Ok(())
@@ -366,6 +396,11 @@ impl SymbolTable {
                 name
             )));
         }
+        let is_macro_scoped = !self.macro_scope_stack.is_empty()
+            || self
+                .globals
+                .get(&key)
+                .is_some_and(|existing| existing.is_macro_scoped);
         if let Some(existing) = self.globals.get_mut(&key) {
             if !existing.is_mutable && existing.value.is_some() {
                 if existing.value != Some(value) {
@@ -388,6 +423,7 @@ impl SymbolTable {
             section: Some(section),
             original_name: name.to_string(),
             is_code_label: false,
+            is_macro_scoped,
         };
         self.globals.insert(key, info);
         Ok(())
@@ -407,6 +443,11 @@ impl SymbolTable {
         } else {
             false
         };
+        let is_macro_scoped = !self.macro_scope_stack.is_empty()
+            || self
+                .globals
+                .get(&key)
+                .is_some_and(|existing| existing.is_macro_scoped);
         let info = SymbolInfo {
             value: None,
             expr: Some(expr),
@@ -419,6 +460,7 @@ impl SymbolTable {
             section: None,
             original_name: name.to_string(),
             is_code_label: false,
+            is_macro_scoped,
         };
         self.globals.insert(key, info);
         Ok(())

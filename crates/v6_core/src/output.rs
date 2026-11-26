@@ -58,7 +58,7 @@ pub fn generate_debug_companion(asm: &Assembler, config: &RomConfig) -> Vec<u8> 
         .filter(|info| {
             (info.is_code_label || is_debug_constant(info))
                 && !info.original_name.starts_with('@')
-                && !is_macro_scoped_name(&info.original_name)
+                && !info.is_macro_scoped
         })
         .collect();
     names.sort_by(|left, right| left.original_name.cmp(&right.original_name));
@@ -168,7 +168,7 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
     if asm.obj.glob_all {
         let mut all_names: Vec<String> = asm.symbols.all_globals()
             .values()
-            .filter(|info| !info.original_name.starts_with('@') && !is_macro_scoped_name(&info.original_name))
+            .filter(|info| !info.original_name.starts_with('@') && !info.is_macro_scoped)
             .map(|info| info.original_name.clone())
             .collect();
         all_names.sort();
@@ -187,7 +187,7 @@ pub fn generate_object(asm: &Assembler, config: &ObjConfig) -> AsmResult<Vec<u8>
             .filter(|info| {
                 (info.is_code_label || is_debug_constant(info))
                     && !info.original_name.starts_with('@')
-                    && !is_macro_scoped_name(&info.original_name)
+                    && !info.is_macro_scoped
             })
             .map(|info| info.original_name.clone())
             .collect();
@@ -233,14 +233,6 @@ fn is_debug_constant(info: &crate::symbols::SymbolInfo) -> bool {
     !info.is_code_label && !info.is_mutable && info.section.is_none() && info.value.is_some()
 }
 
-/// A symbol whose name contains `.` is a per-invocation macro-scoped symbol
-/// (`MacroName_<call-index>.Name`). These are assembler-generated and are
-/// intentionally omitted from the debugger-facing named-symbol set because
-/// their source spelling is synthetic; see `docs/debug-metadata.md`.
-fn is_macro_scoped_name(name: &str) -> bool {
-    name.contains('.')
-}
-
 /// Symbol provenance strings are recorded from `SourceLine::diag_file`, i.e.
 /// `paths::source_display` of the resolved source path against the compilation
 /// directory. They are therefore already in the same form DWARF expects (CWD
@@ -249,7 +241,7 @@ fn is_macro_scoped_name(name: &str) -> bool {
 fn debug_constants(asm: &Assembler) -> Vec<DebugConstant> {
     let mut constants: Vec<_> = asm.symbols.all_globals()
         .values()
-        .filter(|info| is_debug_constant(info) && !info.original_name.starts_with('@') && !is_macro_scoped_name(&info.original_name))
+        .filter(|info| is_debug_constant(info) && !info.original_name.starts_with('@') && !info.is_macro_scoped)
         .map(|info| DebugConstant {
             name: info.original_name.clone(),
             file: info.file.clone(),
@@ -262,9 +254,9 @@ fn debug_constants(asm: &Assembler) -> Vec<DebugConstant> {
 }
 
 /// Collect struct definitions and struct instances/pools for DWARF emission.
-/// Generated `name.<field>` / `name.size` constants are filtered out of the
-/// constant DIE list by their dotted names; instances defined inside macro
-/// expansions are skipped like other macro-scoped symbols.
+/// Generated `name.<field>` / `name.size` constants are ordinary immutable
+/// constants and are recorded with the other constant DIEs; instances defined
+/// inside macro expansions are skipped like other macro-scoped symbols.
 fn debug_struct_types(asm: &Assembler) -> (Vec<DebugStructType>, Vec<DebugInstance>) {
     let mut structs: Vec<_> = asm
         .symbols
@@ -292,7 +284,7 @@ fn debug_struct_types(asm: &Assembler) -> (Vec<DebugStructType>, Vec<DebugInstan
         .all_instances()
         .filter_map(|(key, meta)| {
             let info = asm.symbols.get_global_info(key)?;
-            if is_macro_scoped_name(&info.original_name) {
+            if info.is_macro_scoped {
                 return None;
             }
             Some(DebugInstance {
@@ -355,7 +347,7 @@ fn next_debug_label_offset(asm: &Assembler, section: Option<usize>, offset_or_ad
             info.is_code_label
                 && info.section == section
                 && info.value.is_some_and(|value| value as u32 > offset_or_address)
-                && !is_macro_scoped_name(&info.original_name)
+                && !info.is_macro_scoped
         })
         .filter_map(|info| info.value.map(|value| value as u32))
         .min()

@@ -145,6 +145,9 @@ generic numeric constants, so both use this representation.
 Scoped `@` labels and macro-generated names are intentionally omitted from the
 debugger-facing named-symbol set because their source spelling is not unique.
 Use the DWARF line table to locate generated instructions instead.
+Struct-generated symbols (`<instance>.end`, `<instance>.size`,
+`<struct>.<field>`) are ordinary module-level symbols rather than macro
+generated names, so they are included.
 
 ## Struct Types
 

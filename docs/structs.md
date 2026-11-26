@@ -172,6 +172,11 @@ Every instance and pool also gets auto-generated `<label>.size` and
 `<label>.size` is a plain absolute constant (a length, not an address), so
 `pool.size` equals `pool.end - pool`.
 
+`<label>.end` is an ordinary global label: it can be used anywhere a label can
+(`.if`, `.word`, arithmetic, `.globl`), and it is emitted in object and debug
+symbol tables. Both generated symbols are module-level, so `.global *` exports
+them like any other symbol.
+
 The field names `size` and `end` are reserved: `size` would collide with the
 generated struct size constant, and `end` with the generated instance end
 symbol.

@@ -1,0 +1,37 @@
+# Every struct instance and pool defines `<label>.end`, pointing one past the
+# instance's last byte. The auto label is usable in expressions like any other
+# global label.
+
+[files]
+"main.asm" = '''
+.org $0100
+.struct pair
+lo: byte
+hi: byte
+.ends
+
+one: pair
+many: pair[3]
+init: pair(lo=1, hi=2)
+
+ONE_END  = one.end
+MANY_END = many.end
+INIT_END = init.end
+LEN      = init.end - init
+'''
+
+[expect]
+rom = "01 02"
+min_addr = "0108"
+
+[expect.symbols]
+one = 256
+"one.end" = 258
+many = 258
+"many.end" = 264
+init = 264
+"init.end" = 266
+ONE_END = 258
+MANY_END = 264
+INIT_END = 266
+LEN = 2

@@ -524,7 +524,9 @@ lxi h, char_pool[2].status  ; constant-indexed pool reference
 
 Every struct definition generates `<name>.<field>` offset constants and a
 `<name>.size` constant; every instance and pool generates a `<label>.end`
-symbol.
+label one past its last byte and a `<label>.size` byte-count constant. The
+generated symbols are ordinary module-level symbols, so `.global *` exports
+them too.
 
 ## Data Emission
 
