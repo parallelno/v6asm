@@ -139,17 +139,22 @@ db >$ABCD       ; Emits $AB
 ### Operand and Data Ranges
 
 A **width-limited value** is an instruction operand or data element stored in
-a fixed number of bits. Values must fit either the signed or unsigned range
-of that width; implicit truncation is an error:
+a fixed number of bits. Values must fit the accepted destination range;
+values outside that range are errors:
 
 | Destination | Accepted range |
 |-------------|----------------|
-| 8-bit immediate, port, `.byte` / `DB`, `.storage` fill byte | -128 through 255 |
+| 8-bit instruction immediate or port | -255 through 255 |
+| `.byte` / `DB`, `.storage` fill byte | -128 through 255 |
 | 16-bit immediate/address, `.word` / `DW` | -32768 through 65535 |
 | `.dword` / `DD` | -2147483648 through 4294967295 |
 | `RST` vector | 0 through 7 |
 
-Negative values are encoded in two's complement. These rules apply to all
+Negative values are encoded modulo the destination width. In particular,
+8-bit instruction immediates accept negative magnitudes through -255 and store
+the low eight bits: `mvi a, -225` encodes an immediate byte of 31 (`$1F`),
+and `mvi a, -255` encodes 1. This extended negative range does not apply to
+data directives or `RST` vectors. These rules apply to all
 supported instruction forms, including Z80-compatible forms. `RST` accepts a
 constant expression, not just a literal, and validates the resulting vector.
 

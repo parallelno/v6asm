@@ -76,7 +76,6 @@ fn assemble_rom(source: &str) -> Result<Assembler, AsmError> {
 fn width_limited_constants_reject_overflow_in_both_formats() {
     let byte_instructions = [
         "mvi a,", "mvi m,", "adi", "aci", "sui", "sbi", "ani", "xri", "ori", "cpi", "in", "out",
-        ".byte", "db", ".storage 1,",
     ];
     let word_instructions = [
         "lxi h,", "lxi sp,", "lda", "sta", "lhld", "shld", "jmp", "jnz", "jz", "jnc", "jc",
@@ -85,7 +84,8 @@ fn width_limited_constants_reject_overflow_in_both_formats() {
     ];
     for format in [OutputFormat::Rom, OutputFormat::Obj] {
         for (instructions, values) in [
-            (byte_instructions.as_slice(), [-129i64, 256]),
+            (byte_instructions.as_slice(), [-256i64, 256]),
+            ([".byte", "db", ".storage 1,"].as_slice(), [-129, 256]),
             (word_instructions.as_slice(), [-32769, 65536]),
             ([".dword", "dd"].as_slice(), [-2147483649, 4294967296]),
         ] {
@@ -99,6 +99,50 @@ fn width_limited_constants_reject_overflow_in_both_formats() {
             }
         }
     }
+}
+
+#[test]
+fn byte_instruction_immediates_accept_negative_unsigned_magnitudes() {
+    let instructions = [
+        "mvi a,", "mvi b,", "mvi c,", "mvi d,", "mvi e,", "mvi h,", "mvi l,", "mvi m,",
+        "adi", "aci", "sui", "sbi", "ani", "xri", "ori", "cpi", "in", "out",
+    ];
+    for format in [OutputFormat::Rom, OutputFormat::Obj] {
+        for cpu in [CpuMode::I8080, CpuMode::Z80] {
+            for instruction in instructions {
+                for value in [-255, -225, -129, -128, 0, 255] {
+                    let source = format!("{} VALUE\nVALUE = {}\n", instruction, value);
+                    let asm = assemble_source(&source, format, cpu).unwrap();
+                    let actual = if format == OutputFormat::Obj {
+                        asm.obj.sections[0].bytes[1]
+                    } else {
+                        asm.output.read_byte(1).unwrap()
+                    };
+                    assert_eq!(actual, value as u8, "{}", source);
+                }
+            }
+        }
+        for instruction in ["ld a,", "ld (hl),", "and", "xor", "or", "cp"] {
+            for value in [-255, -225, -129, 255] {
+                let source = format!("{} {}\n", instruction, value);
+                let asm = assemble_source(&source, format, CpuMode::Z80).unwrap();
+                let actual = if format == OutputFormat::Obj {
+                    asm.obj.sections[0].bytes[1]
+                } else {
+                    asm.output.read_byte(1).unwrap()
+                };
+                assert_eq!(actual, value as u8, "{}", source);
+            }
+            for value in [-256, 256] {
+                let source = format!("{} {}\n", instruction, value);
+                let err = assemble_source(&source, format, CpuMode::Z80).err().unwrap();
+                assert!(err.message.contains("expected [-255, 255]"), "{}: {}", source, err.message);
+            }
+        }
+    }
+    // ROM label arithmetic is validated using its final resolved value.
+    let asm = assemble_rom("mvi a, target - 227\ntarget:\nnop\n").unwrap();
+    assert_eq!(asm.output.read_byte(1), Some(31));
 }
 
 #[test]
@@ -187,7 +231,7 @@ fn rst_expressions_are_resolved_and_range_checked() {
 #[test]
 fn z80_compatibility_operands_follow_width_rules() {
     for format in [OutputFormat::Rom, OutputFormat::Obj] {
-        for instruction in ["ld a, 256", "adi -129", "and 256", "cp 256", "ld hl, 65536", "jp 65536", "call nz, 65536"] {
+        for instruction in ["ld a, 256", "adi -256", "and 256", "cp 256", "ld hl, 65536", "jp 65536", "call nz, 65536"] {
             let err = assemble_source(&format!("{}\n", instruction), format, CpuMode::Z80).err().unwrap();
             assert!(err.message.contains("out of range"), "{}: {}", instruction, err.message);
         }

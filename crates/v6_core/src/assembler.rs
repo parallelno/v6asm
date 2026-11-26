@@ -1921,7 +1921,7 @@ impl Assembler {
                         addend: rv.addend,
                     });
                 } else {
-                    encoded.bytes[1] = Self::check_value_range(rv.require_constant()?, 8, mnemonic)? as u8;
+                    encoded.bytes[1] = Self::check_imm8_range(rv.require_constant()?, mnemonic)?;
                 }
                 expr_idx += 1;
             }
@@ -1952,7 +1952,7 @@ impl Assembler {
         // Fill in immediate values from expressions
         let mut expr_idx = 0;
         if encoded.has_imm8 && expr_idx < expressions.len() {
-            let val = Self::check_value_range(self.eval_expr(&expressions[expr_idx])?, 8, mnemonic)? as u8;
+            let val = Self::check_imm8_range(self.eval_expr(&expressions[expr_idx])?, mnemonic)?;
             encoded.bytes[1] = val;
             expr_idx += 1;
         }
@@ -1970,6 +1970,18 @@ impl Assembler {
     fn instruction_size(&self, mnemonic: &str, operands: &[ParsedOperand]) -> AsmResult<usize> {
         let encoded = encode_instruction(mnemonic, operands, self.cpu_mode)?;
         Ok(encoded.size)
+    }
+
+    /// Instruction byte immediates also accept negative unsigned magnitudes,
+    /// encoded modulo 256 (for example, -225 becomes 31).
+    fn check_imm8_range(value: i64, context: &str) -> AsmResult<u8> {
+        if !(-255..=255).contains(&value) {
+            return Err(AsmError::new(format!(
+                "{}: value {} out of range for 8 bits: expected [-255, 255]",
+                context, value,
+            )));
+        }
+        Ok(value as u8)
     }
 
     /// Accept signed or unsigned values representable in the destination width.
