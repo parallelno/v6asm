@@ -1,0 +1,19 @@
+# Tests .reserve as an alias for .storage
+
+[files]
+"main.asm" = '''
+.org 0x0010
+uninit: .reserve 4
+after_uninit:
+init:   .RESERVE 3, 0x7E
+after_init:
+    db 0xAA
+'''
+
+[expect]
+rom = "7E 7E 7E AA"
+min_addr = "0014"
+
+[expect.symbols]
+uninit = 16
+init = 20

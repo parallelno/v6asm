@@ -683,7 +683,7 @@ fn parse_directive(name: &str, tokens: &[LocatedToken], pos: &mut usize) -> AsmR
             *pos += consumed;
             Ok(Directive::Align(expr))
         }
-        "STORAGE" => {
+        "STORAGE" | "RESERVE" => {
             let (length, consumed) = parse_expr_from(tokens, *pos)?;
             *pos += consumed;
             let filler = if eat_comma(tokens, pos) {

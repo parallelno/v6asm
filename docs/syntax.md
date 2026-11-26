@@ -145,7 +145,7 @@ values outside that range are errors:
 | Destination | Accepted range |
 |-------------|----------------|
 | 8-bit instruction immediate or port | -255 through 255 |
-| `.byte` / `DB`, `.storage` fill byte | -128 through 255 |
+| `.byte` / `DB`, `.storage` / `.reserve` fill byte | -128 through 255 |
 | 16-bit immediate/address, `.word` / `DW` | -32768 through 65535 |
 | `.dword` / `DD` | -2147483648 through 4294967295 |
 | `RST` vector | 0 through 7 |

@@ -414,9 +414,9 @@ _v6_gc_buffer:
 .endopt
 ```
 
-## `.storage`
+## `.storage` / `.reserve`
 
-Reserves bytes of address space. If `Filler` is provided, the assembler emits that byte `Length` times. If omitted, the bytes are uninitialized (PC advances but nothing is written), useful for runtime buffers.
+Reserves bytes of address space. `.reserve` is an accepted alias for `.storage`. If `Filler` is provided, the assembler emits that byte `Length` times. If omitted, the bytes are uninitialized (PC advances but nothing is written), useful for runtime buffers.
 
 ```asm
 .org 0x200
