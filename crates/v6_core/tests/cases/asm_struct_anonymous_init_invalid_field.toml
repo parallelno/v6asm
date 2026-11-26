@@ -1,0 +1,11 @@
+[files]
+"main.asm" = '''
+.struct sprite
+y: byte
+.ends
+sprite (unknown=1)
+'''
+
+[expect]
+error_contains = "Struct 'sprite' has no field 'unknown'"
+error_line = 4

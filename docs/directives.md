@@ -511,6 +511,7 @@ hero: actor                        ; uninitialized instance
 shield: actor(pos_x = 5, pos_y = 10) ; named initializer form (the only
                                    ; supported form; positional lists are
                                    ; rejected)
+actor (pos_x = 7, pos_y = 12)      ; anonymous initialized instance, no symbols
 char_pool: actor[12]               ; pool of 12 uninitialized instances
 ```
 
@@ -523,7 +524,7 @@ lxi h, char_pool[2].status  ; constant-indexed pool reference
 ```
 
 Every struct definition generates `<name>.<field>` offset constants and a
-`<name>.size` constant; every instance and pool generates a `<label>.end`
+`<name>.size` constant; every labeled instance and pool generates a `<label>.end`
 label one past its last byte and a `<label>.size` byte-count constant. The
 generated symbols are ordinary module-level symbols, so `.global *` exports
 them too.

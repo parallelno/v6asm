@@ -158,7 +158,7 @@ debug output is enabled. See [Structs](structs.md) for the assembler syntax.
   byte size) with one `DW_TAG_member` child per field. Members reference
   `byte`/`word`/`dword` base types and record their byte offset with
   `DW_AT_data_member_location`.
-- Each struct instance produces one `DW_TAG_variable` DIE with its struct type
+- Each labeled struct instance produces one `DW_TAG_variable` DIE with its struct type
   and address.
 - A pool (`label: name[N]`) produces a `DW_TAG_variable` with a
   `DW_TAG_array_type` whose element is the struct type and whose

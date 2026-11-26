@@ -20,7 +20,7 @@ pub enum ParsedLine {
     /// field-name label on the same line (`name: byte`).
     FieldDecl(StructFieldType),
     /// A struct instance declaration in statement position:
-    /// `label: name`, `label: name(f1=v1, ...)` or `label: name[N]`.
+    /// `label: name`, `[label:] name(f1=v1, ...)` or `label: name[N]`.
     StructInstance {
         struct_name: String,
         /// Pool element count for the `name[N]` form.

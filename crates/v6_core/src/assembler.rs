@@ -584,19 +584,9 @@ impl Assembler {
                     line_label = Some((name.clone(), true));
                 }
                 ParsedLine::StructInstance { struct_name, count, init } => {
-                    let Some((label, is_local)) = line_label.clone() else {
-                        return Err(AsmError::new(
-                            "A struct instance declaration requires a label on the same line ('label: name')",
-                        )
-                        .ensure_location(line.diag_file(), line.diag_line()));
-                    };
-                    if is_local {
-                        return Err(AsmError::new(
-                            "Struct instances must use a global label",
-                        )
-                        .ensure_location(line.diag_file(), line.diag_line()));
-                    }
-                    self.process_struct_instance_pass1(&label, struct_name, count.as_ref(), init.as_ref(), line)
+                    let label = Self::struct_instance_label(line_label.as_ref(), init.is_some())
+                        .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
+                    self.process_struct_instance_pass1(label, struct_name, count.as_ref(), init.as_ref(), line)
                         .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                 }
                 ParsedLine::FieldDecl(_) => {
@@ -1142,21 +1132,11 @@ impl Assembler {
                     line_label = Some((name.clone(), true));
                 }
                 ParsedLine::StructInstance { struct_name, count, init } => {
-                    let Some((label, is_local)) = line_label.clone() else {
-                        return Err(AsmError::new(
-                            "A struct instance declaration requires a label on the same line ('label: name')",
-                        )
-                        .ensure_location(line.diag_file(), line.diag_line()));
-                    };
-                    if is_local {
-                        return Err(AsmError::new(
-                            "Struct instances must use a global label",
-                        )
-                        .ensure_location(line.diag_file(), line.diag_line()));
-                    }
+                    let label = Self::struct_instance_label(line_label.as_ref(), init.is_some())
+                        .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                     let kind = if init.is_some() { EmissionKind::Data } else { EmissionKind::Storage };
                     let (section, offset_or_address) = self.debug_position();
-                    self.process_struct_instance_pass2(&label, struct_name, count.as_ref(), init.as_ref(), line)
+                    self.process_struct_instance_pass2(label, struct_name, count.as_ref(), init.as_ref(), line)
                         .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()))?;
                     self.record_debug_row(
                         line,
@@ -1617,6 +1597,7 @@ impl Assembler {
         for line in lines {
             // A macro invocation expands to instructions: treat as code.
             match parse_macro_invocation(&line.text, &self.symbols) {
+                MacroInvocationResult::UndefinedMacro(name) if self.symbols.get_struct(&name).is_some() => {}
                 MacroInvocationResult::KnownMacro(_, _) | MacroInvocationResult::UndefinedMacro(_) => {
                     return Ok(OptionalBlockClass::Code);
                 }
@@ -1630,6 +1611,8 @@ impl Assembler {
             for item in parsed {
                 match item {
                     ParsedLine::Instruction { .. } => return Ok(OptionalBlockClass::Code),
+                    ParsedLine::StructInstance { init: Some(_), .. } => has_initialized_data = true,
+                    ParsedLine::StructInstance { init: None, .. } => has_storage = true,
                     ParsedLine::Directive(dir) => match dir {
                         // `.storage` without a filler reserves space but emits
                         // no bytes — eligible for `.bss`.
@@ -2477,12 +2460,45 @@ impl Assembler {
         Ok(())
     }
 
+    fn struct_instance_label(
+        label: Option<&(String, bool)>,
+        initialized: bool,
+    ) -> AsmResult<Option<&str>> {
+        match label {
+            Some((_, true)) => Err(AsmError::new("Struct instances must use a global label")),
+            Some((name, false)) => Ok(Some(name)),
+            None if initialized => Ok(None),
+            None => Err(AsmError::new(
+                "A struct instance declaration requires a label on the same line ('label: name')",
+            )),
+        }
+    }
+
+    fn define_struct_instance_symbols(
+        &mut self,
+        label: &str,
+        struct_name: &str,
+        count: Option<i64>,
+        total: u16,
+        line: &SourceLine,
+    ) -> AsmResult<()> {
+        let file = line.diag_file();
+        let line_num = line.diag_line();
+        let scoped = self.symbols.scoped_global_name(label);
+        let section = (self.output_format == OutputFormat::Obj).then_some(self.obj.active);
+        self.symbols.define_struct_instance(&scoped, struct_name, count, file, line_num)?;
+        self.symbols.define_generated_label_in(
+            &format!("{}.end", scoped), self.pc.wrapping_add(total), section, file, line_num,
+        )?;
+        self.symbols.define_constant(&format!("{}.size", scoped), total as i64, file, line_num)
+    }
+
     /// Pass-1 handling of a struct instance/pool declaration: register the
     /// instance metadata, define the auto `label.end` symbol, and advance the
     /// location counter by the total size (values are emitted in pass 2).
     fn process_struct_instance_pass1(
         &mut self,
-        label: &str,
+        label: Option<&str>,
         struct_name: &str,
         count: Option<&Expr>,
         init: Option<&Vec<(String, Expr)>>,
@@ -2500,23 +2516,9 @@ impl Assembler {
             }
             self.validate_struct_init(struct_name, fields, &file, line_num)?;
         }
-        let scoped = self.symbols.scoped_global_name(label);
-        self.symbols
-            .define_struct_instance(&scoped, struct_name, count_val, &file, line_num)?;
-        let end_name = format!("{}.end", scoped);
-        match self.output_format {
-            OutputFormat::Rom => self
-                .symbols
-                .define_label(&end_name, self.pc.wrapping_add(total), &file, line_num)?,
-            OutputFormat::Obj => self
-                .symbols
-                .define_label_in(&end_name, self.pc.wrapping_add(total), Some(self.obj.active), &file, line_num)?,
+        if let Some(label) = label {
+            self.define_struct_instance_symbols(label, struct_name, count_val, total, line)?;
         }
-        // Auto `label.size`: total reserved/emitted byte count of the
-        // instance (count * struct size for pools). A plain absolute
-        // constant, like the struct type's own `name.size`.
-        self.symbols
-            .define_constant(&format!("{}.size", scoped), total as i64, &file, line_num)?;
         // Both forms occupy the same space; uninitialized instances are a
         // pure reservation (`.storage`-like), initialized ones emit their
         // bytes in pass 2.
@@ -2528,7 +2530,7 @@ impl Assembler {
     /// auto `label.end` symbol at the same address and emit the contents.
     fn process_struct_instance_pass2(
         &mut self,
-        label: &str,
+        label: Option<&str>,
         struct_name: &str,
         count: Option<&Expr>,
         init: Option<&Vec<(String, Expr)>>,
@@ -2537,20 +2539,9 @@ impl Assembler {
         let file = line.diag_file().to_string();
         let line_num = line.diag_line();
         let (count_val, total) = self.struct_instance_layout(struct_name, count, &file, line_num)?;
-        let scoped = self.symbols.scoped_global_name(label);
-        self.symbols
-            .define_struct_instance(&scoped, struct_name, count_val, &file, line_num)?;
-        let end_name = format!("{}.end", scoped);
-        match self.output_format {
-            OutputFormat::Rom => self
-                .symbols
-                .define_label(&end_name, self.pc.wrapping_add(total), &file, line_num)?,
-            OutputFormat::Obj => self
-                .symbols
-                .define_label_in(&end_name, self.pc.wrapping_add(total), Some(self.obj.active), &file, line_num)?,
+        if let Some(label) = label {
+            self.define_struct_instance_symbols(label, struct_name, count_val, total, line)?;
         }
-        self.symbols
-            .define_constant(&format!("{}.size", scoped), total as i64, &file, line_num)?;
         match init {
             None => self.out_reserve(total, None),
             Some(fields) => self.emit_struct_init(struct_name, fields, &file, line_num)?,
@@ -3000,10 +2991,10 @@ impl Assembler {
         let mut labels: Vec<PackLabel> = Vec::new();
         let mut consts: Vec<PackConst> = Vec::new();
         let mut current_global_label: Option<String> = None;
-        // The label a struct instance declaration attaches to (same line).
-        let mut last_label: Option<(String, bool)> = None;
 
         for line in &lines[start + 1..end] {
+            // An instance can only attach to a label on this line.
+            let mut last_label: Option<(String, bool)> = None;
             let tokens = tokenize_line(&line.text, line.diag_file(), line.diag_line())
                 .map_err(|e| e.ensure_location(line.diag_file(), line.diag_line()).ensure_notes(expansion_notes(line)))?;
             if tokens.is_empty() { continue; }

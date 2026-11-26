@@ -191,6 +191,12 @@ impl SymbolTable {
         self.current_scope
     }
 
+    /// Deferred symbols can be resolved after their macro expansion has ended.
+    fn global_is_macro_scoped(&self, key: &str) -> bool {
+        !self.macro_scope_stack.is_empty()
+            || self.globals.get(key).is_some_and(|info| info.is_macro_scoped)
+    }
+
     /// Define a global label at an address
     pub fn define_label(&mut self, name: &str, addr: u16, file: &str, line: usize) -> AsmResult<()> {
         self.define_label_in(name, addr, None, file, line)
@@ -200,6 +206,13 @@ impl SymbolTable {
     /// (object mode). When `section` is `Some`, `addr` is a section-relative
     /// offset.
     pub fn define_label_in(&mut self, name: &str, addr: u16, section: Option<usize>, file: &str, line: usize) -> AsmResult<()> {
+        self.define_generated_label_in(name, addr, section, file, line)?;
+        self.enter_scope(name);
+        Ok(())
+    }
+
+    /// Define a label without opening a new scope for `@` labels.
+    pub(crate) fn define_generated_label_in(&mut self, name: &str, addr: u16, section: Option<usize>, file: &str, line: usize) -> AsmResult<()> {
         let key = ci(name);
         if self.structs.contains_key(&key) {
             return Err(AsmError::new(format!(
@@ -207,14 +220,7 @@ impl SymbolTable {
                 name
             )));
         }
-        // Preserve the pass-1 classification when pass 2 redefines a symbol
-        // whose name is already namespaced, even if the macro scope stack has
-        // since been popped (e.g. deferred constants resolved after pass 1).
-        let is_macro_scoped = !self.macro_scope_stack.is_empty()
-            || self
-                .globals
-                .get(&key)
-                .is_some_and(|existing| existing.is_macro_scoped);
+        let is_macro_scoped = self.global_is_macro_scoped(&key);
         let info = SymbolInfo {
             value: Some(addr as i64),
             expr: None,
@@ -240,7 +246,6 @@ impl SymbolTable {
         }
 
         self.globals.insert(key, info);
-        self.enter_scope(name);
         Ok(())
     }
 
@@ -283,13 +288,7 @@ impl SymbolTable {
                 name
             )));
         }
-        // Preserve the pass-1 classification for deferred constants that are
-        // resolved after the macro scope stack has been restored.
-        let is_macro_scoped = !self.macro_scope_stack.is_empty()
-            || self
-                .globals
-                .get(&key)
-                .is_some_and(|existing| existing.is_macro_scoped);
+        let is_macro_scoped = self.global_is_macro_scoped(&key);
         if let Some(existing) = self.globals.get(&key) {
             if !existing.is_mutable && existing.value.is_some() {
                 // Allow same-value redefinition (pass 2)
@@ -349,11 +348,7 @@ impl SymbolTable {
                 name
             )));
         }
-        let is_macro_scoped = !self.macro_scope_stack.is_empty()
-            || self
-                .globals
-                .get(&key)
-                .is_some_and(|existing| existing.is_macro_scoped);
+        let is_macro_scoped = self.global_is_macro_scoped(&key);
         let info = SymbolInfo {
             value: Some(value),
             expr: None,
@@ -396,11 +391,7 @@ impl SymbolTable {
                 name
             )));
         }
-        let is_macro_scoped = !self.macro_scope_stack.is_empty()
-            || self
-                .globals
-                .get(&key)
-                .is_some_and(|existing| existing.is_macro_scoped);
+        let is_macro_scoped = self.global_is_macro_scoped(&key);
         if let Some(existing) = self.globals.get_mut(&key) {
             if !existing.is_mutable && existing.value.is_some() {
                 if existing.value != Some(value) {
@@ -443,11 +434,7 @@ impl SymbolTable {
         } else {
             false
         };
-        let is_macro_scoped = !self.macro_scope_stack.is_empty()
-            || self
-                .globals
-                .get(&key)
-                .is_some_and(|existing| existing.is_macro_scoped);
+        let is_macro_scoped = self.global_is_macro_scoped(&key);
         let info = SymbolInfo {
             value: None,
             expr: Some(expr),

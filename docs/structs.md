@@ -59,8 +59,8 @@ The following size types are supported. Aliases are equivalent:
 
 ## Initialization
 
-Struct instances are declared as global labels. Initialization depends on
-whether an initializer list was supplied at the declaration.
+Struct instances can be declared with a global label. An initialized instance
+can also omit the label; this is an **anonymous instance**.
 
 - **Uninitialized instance**: reserves `struct_name.size` bytes like
   `.storage <N>`. Contents are undefined until runtime code initializes them;
@@ -82,9 +82,20 @@ sword: actor(pos_x = 5, pos_y = 10)
 An empty initializer list (`label: name()`) is an error; write `label: name`
 for an uninitialized instance.
 
-Because a struct instance is a global label, it is visible everywhere labels
-are, including across files (via `.global` / `.weak`) and inside `.pack` blocks
-(matching how v6gel defines `hero_runtime_data` today).
+Use anonymous instances to emit consecutive records without naming each one:
+
+```asm
+sprites: sprite(scr_addr_y = 234)
+sprite (scr_addr_y = 221)
+sprite (scr_addr_y = 203)
+sprites_end:
+```
+
+An anonymous instance emits the same bytes as a labeled instance, but creates
+no symbols. `sprites.end` marks the end of the first record, not the whole list;
+use an explicit label such as `sprites_end` for the end of the list. Uninitialized
+instances and pools still require a label. Neither form of initialized instance
+is allowed inside `.pack`.
 
 > Note: a runtime-zeroed instance is a **reservation only**. The assembler
 > does not guarantee the bytes contain zero at runtime; it only guarantees the
@@ -161,7 +172,7 @@ resolution and are covered by `.global *`.
 ;   actor.size       = 7
 ```
 
-Every instance and pool also gets auto-generated `<label>.size` and
+Every labeled instance and pool also gets auto-generated `<label>.size` and
 `<label>.end` symbols:
 
 | Symbol          | Meaning                                            |
@@ -172,10 +183,9 @@ Every instance and pool also gets auto-generated `<label>.size` and
 `<label>.size` is a plain absolute constant (a length, not an address), so
 `pool.size` equals `pool.end - pool`.
 
-`<label>.end` is an ordinary global label: it can be used anywhere a label can
-(`.if`, `.word`, arithmetic, `.globl`), and it is emitted in object and debug
-symbol tables. Both generated symbols are module-level, so `.global *` exports
-them like any other symbol.
+`<label>.end` can be used in expressions and exported with `.globl`. It does
+not start a new scope for `@` labels. For module-level instances, `.global *`
+exports both generated symbols, and `-g` includes `.end` in the debug symbol table.
 
 The field names `size` and `end` are reserved: `size` would collide with the
 generated struct size constant, and `end` with the generated instance end
@@ -210,7 +220,7 @@ With `-g`, struct definitions and instances are emitted into `.debug_info`:
 - one `DW_TAG_structure_type` per struct (name + byte size) with one
   `DW_TAG_member` child per field (name, byte offset, base type
   `byte`/`word`/`dword`);
-- one `DW_TAG_variable` per instance, typed by its struct;
+- one `DW_TAG_variable` per labeled instance, typed by its struct;
 - pools emit a `DW_TAG_array_type` (element = the struct,
   `DW_TAG_subrange_type` with count N), so the debugger shows them as indexed,
   expandable element lists;

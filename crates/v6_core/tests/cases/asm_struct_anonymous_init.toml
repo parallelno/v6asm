@@ -1,0 +1,28 @@
+# Anonymous initialized instances emit consecutive records without adding labels.
+
+[files]
+"main.asm" = '''
+.org $0100
+.struct sprite
+y: byte
+x: byte
+frame: word
+.ends
+
+X_BASE = 10
+sprites: sprite (y=234, x=X_BASE + 7, frame=frames)
+@next:
+sprite (y=221, x=X_BASE + 26, frame=frames + 1)
+sprite(y=203, x=X_BASE + 30)
+.word @next
+frames:
+'''
+
+[expect]
+rom = "EA 11 0E 01 DD 24 0F 01 CB 28 00 00 04 01"
+
+[expect.symbols]
+sprites = 256
+"sprites.end" = 260
+"sprites.size" = 4
+frames = 270

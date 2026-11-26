@@ -1,0 +1,14 @@
+[files]
+"main.asm" = '''
+.struct sprite
+y: byte
+.ends
+.pack
+sprites: sprite
+sprite(y=2)
+.endpack
+'''
+
+[expect]
+error_contains = "Initialized struct instances are not allowed inside a .pack block"
+error_line = 6

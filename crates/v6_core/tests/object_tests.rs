@@ -477,6 +477,34 @@ fn struct_instance_end_labels_are_emitted_in_object_symbols() {
 }
 
 #[test]
+fn anonymous_struct_initializers_emit_data_and_relocations_without_symbols() {
+    let asm = assemble_obj(
+        ".struct sprite\n\
+         y: byte\n\
+         frame: word\n\
+         .ends\n\
+         .optional\n\
+         sprites: sprite(y=1)\n\
+         sprite (y=2, frame=external_frame + 1)\n\
+         sprite(y=3)\n\
+         .endoptional\n\
+         .word sprites\n",
+    )
+    .unwrap();
+    let section = asm.obj.sections.iter().find(|sec| sec.name == ".data.sprites").unwrap();
+    assert_eq!(section.bytes, [1, 0, 0, 2, 0, 0, 3, 0, 0]);
+    assert_eq!(section.relocs.len(), 1);
+    let reloc = &section.relocs[0];
+    assert_eq!(reloc.offset, 4);
+    assert_eq!(reloc.target, RelocTarget::Symbol("external_frame".into()));
+    assert_eq!(reloc.addend, 1);
+    assert_eq!(asm.symbols.resolve("sprites.end"), Some(3));
+    assert_eq!(asm.symbols.all_instances().count(), 1);
+    assert_eq!(asm.symbols.all_globals().len(), 6); // type and instance symbols only
+    assert_eq!(asm.symbols.current_scope(), 1); // only the explicit `sprites:` label
+}
+
+#[test]
 fn global_star_exports_generated_struct_symbols() {
     let asm = assemble_obj(
         ".globl *\n\
